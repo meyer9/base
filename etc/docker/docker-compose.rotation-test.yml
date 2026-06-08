@@ -1,0 +1,72 @@
+services:
+  rotation-node1:
+    image: base-reth-node:local
+    container_name: rotation-node1
+    network_mode: host
+    volumes:
+      - /home/meyer9/snapshots/rotation-node1:/data
+    command:
+      - node
+      - --chain=base
+      - --datadir=/data
+      - --port=30303
+      - --discovery.port=9200
+      - --http
+      - --http.addr=0.0.0.0
+      - --http.port=8545
+      - --authrpc.addr=0.0.0.0
+      - --authrpc.port=8551
+      - --authrpc.jwtsecret=/data/jwt.hex
+      - --nat=extip:23.240.242.56
+      - --color=never
+    environment:
+      - RUST_LOG=net::peers=trace,reth::network=debug,info
+    restart: unless-stopped
+
+  rotation-node2:
+    image: base-reth-node:local
+    container_name: rotation-node2
+    network_mode: host
+    volumes:
+      - /home/meyer9/snapshots/rotation-node2:/data
+    command:
+      - node
+      - --chain=base
+      - --datadir=/data
+      - --port=30313
+      - --discovery.port=9210
+      - --http
+      - --http.addr=0.0.0.0
+      - --http.port=8555
+      - --authrpc.addr=0.0.0.0
+      - --authrpc.port=8561
+      - --authrpc.jwtsecret=/data/jwt.hex
+      - --nat=extip:23.240.242.56
+      - --color=never
+    environment:
+      - RUST_LOG=net::peers=trace,reth::network=debug,info
+    restart: unless-stopped
+
+  rotation-node3:
+    image: base-reth-node:local
+    container_name: rotation-node3
+    network_mode: host
+    volumes:
+      - /home/meyer9/snapshots/rotation-node3:/data
+    command:
+      - node
+      - --chain=base
+      - --datadir=/data
+      - --port=30323
+      - --discovery.port=9220
+      - --http
+      - --http.addr=0.0.0.0
+      - --http.port=8565
+      - --authrpc.addr=0.0.0.0
+      - --authrpc.port=8571
+      - --authrpc.jwtsecret=/data/jwt.hex
+      - --nat=extip:23.240.242.56
+      - --color=never
+    environment:
+      - RUST_LOG=net::peers=trace,reth::network=debug,info
+    restart: unless-stopped
