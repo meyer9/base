@@ -17,6 +17,7 @@ services:
       - --authrpc.addr=0.0.0.0
       - --authrpc.port=8551
       - --authrpc.jwtsecret=/data/jwt.hex
+      - --max-peers=256
       - --nat=extip:23.240.242.56
       - --color=never
     environment:
@@ -41,6 +42,7 @@ services:
       - --authrpc.addr=0.0.0.0
       - --authrpc.port=8561
       - --authrpc.jwtsecret=/data/jwt.hex
+      - --max-peers=256
       - --nat=extip:23.240.242.56
       - --color=never
     environment:
@@ -65,6 +67,7 @@ services:
       - --authrpc.addr=0.0.0.0
       - --authrpc.port=8571
       - --authrpc.jwtsecret=/data/jwt.hex
+      - --max-peers=256
       - --nat=extip:23.240.242.56
       - --color=never
     environment:
