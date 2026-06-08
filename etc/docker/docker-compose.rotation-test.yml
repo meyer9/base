@@ -58,7 +58,7 @@ services:
       - --chain=base
       - --datadir=/data
       - --port=30323
-      - --discovery.port=9220
+      - --discovery.port=9230
       - --http
       - --http.addr=0.0.0.0
       - --http.port=8565
