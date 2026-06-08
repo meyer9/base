@@ -39,8 +39,8 @@ age_str() {
     fi
 }
 
-printf '\n%-18s  %-6s  %-12s  %-10s  %s\n' "NODE" "PEERS" "BLOCK" "AGE" "ENODE"
-printf '%-18s  %-6s  %-12s  %-10s  %s\n' "----" "-----" "-----" "---" "-----"
+printf '\n%-18s  %-6s  %-12s  %-10s  %-30s  %-30s  %s\n' "NODE" "PEERS" "BLOCK" "AGE" "RLPx (TCP)" "discv5 (UDP)" "PEER ID"
+printf '%-18s  %-6s  %-12s  %-10s  %-30s  %-30s  %s\n' "----" "-----" "-----" "---" "----------" "------------" "-------"
 
 for entry in "${EL_NODES[@]}"; do
     name="${entry%%:*}"
@@ -56,7 +56,22 @@ for entry in "${EL_NODES[@]}"; do
 
     enode=$(docker logs "$name" 2>&1 | grep -o 'enode://[^@]*@[^ ]*' | tail -1 || echo "?")
 
-    printf '%-18s  %-6s  %-12s  %-10s  %s\n' "$name" "$peers" "$block_num" "$age" "$enode"
+    pubkey=$(echo "$enode" | grep -o 'enode://[^@]*' | sed 's/enode:\/\///')
+    pubkey_short="${pubkey:0:40}…"
+    hostport=$(echo "$enode" | grep -o '@[^?]*' | sed 's/@//')
+    ip="${hostport%%:*}"
+    tcp_port="${hostport##*:}"
+    udp_port=$(echo "$enode" | grep -o 'discport=[0-9]*' | cut -d= -f2)
+    udp_port="${udp_port:-$tcp_port}"
+
+    rlpx_addr="${ip}:${tcp_port}"
+    discv5_addr="/ip4/${ip}/udp/${udp_port}"
+
+    printf '%-18s  %-6s  %-12s  %-10s  %-30s  %-30s  %s\n' \
+        "$name" "$peers" "$block_num" "$age" "$rlpx_addr" "$discv5_addr" "0x${pubkey_short}"
 done
 
+echo
+echo "To ping RLPx TCP:  nc -zv <IP> <TCP_PORT>"
+echo "To ping discv5 UDP: nc -zuv <IP> <UDP_PORT>"
 echo
