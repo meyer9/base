@@ -10,7 +10,7 @@ services:
       - --chain=base
       - --datadir=/data
       - --port=30303
-      - --discovery.port=9200
+      - --discovery.v5.port=9200
       - --http
       - --http.addr=0.0.0.0
       - --http.port=8545
@@ -34,7 +34,7 @@ services:
       - --chain=base
       - --datadir=/data
       - --port=30313
-      - --discovery.port=9210
+      - --discovery.v5.port=9210
       - --http
       - --http.addr=0.0.0.0
       - --http.port=8555
@@ -58,7 +58,7 @@ services:
       - --chain=base
       - --datadir=/data
       - --port=30323
-      - --discovery.port=9230
+      - --discovery.v5.port=9220
       - --http
       - --http.addr=0.0.0.0
       - --http.port=8565
