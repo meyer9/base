@@ -16,11 +16,12 @@ use tokio::{
     sync::{mpsc, watch},
     task::JoinHandle,
 };
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::{
     BuildRequest, CheckpointWriter, Conductor, EngineActorRequest, EngineClientError,
     EngineDerivationClient, EngineError, GetPayloadRequest, InsertUnsafePayloadRequest, NodeMode,
-    NoopCheckpointWriter,
+    NoopCheckpointWriter, UnsafeL2BlockRequest,
 };
 
 /// Requires that the implementor handles engine requests via the provided channel.
@@ -808,7 +809,7 @@ where
                             Arc::clone(&self.client),
                             Arc::clone(&self.rollup),
                             safe_signal,
-                            opentelemetry::Context::current(),
+                            tracing::Span::current().context(),
                         )));
                         self.engine.enqueue(task);
                     }
@@ -823,9 +824,9 @@ where
                         )));
                         self.engine.enqueue(task);
                     }
-                    EngineActorRequest::ProcessUnsafeL2BlockRequest(envelope) => {
-                        let otel_cx = opentelemetry::Context::current();
-                        self.handle_external_unsafe_l2_block(*envelope, otel_cx);
+                    EngineActorRequest::ProcessUnsafeL2BlockRequest(request) => {
+                        let UnsafeL2BlockRequest { envelope, otel_cx } = *request;
+                        self.handle_external_unsafe_l2_block(envelope, otel_cx);
                     }
                     EngineActorRequest::ProcessLocalUnsafeL2BlockRequest(envelope) => {
                         let InsertUnsafePayloadRequest { envelope, result_tx, otel_cx } = *envelope;

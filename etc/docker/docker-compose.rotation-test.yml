@@ -103,7 +103,7 @@ services:
       - --chain=base
       - --l1-eth-rpc=${L1_ETH_RPC}
       - --l1-beacon=${L1_BEACON}
-      - --l2-engine-rpc=ws://127.0.0.1:8551
+      - --l2-engine-rpc=http://127.0.0.1:8551
       - --l2-engine-jwt-secret=/data/jwt.hex
       - --rpc.port=9545
       - --p2p.listen.tcp=9222
@@ -131,7 +131,7 @@ services:
       - --chain=base
       - --l1-eth-rpc=${L1_ETH_RPC}
       - --l1-beacon=${L1_BEACON}
-      - --l2-engine-rpc=ws://127.0.0.1:8561
+      - --l2-engine-rpc=http://127.0.0.1:8561
       - --l2-engine-jwt-secret=/data/jwt.hex
       - --rpc.port=9555
       - --p2p.listen.tcp=9232
@@ -159,7 +159,7 @@ services:
       - --chain=base
       - --l1-eth-rpc=${L1_ETH_RPC}
       - --l1-beacon=${L1_BEACON}
-      - --l2-engine-rpc=ws://127.0.0.1:8571
+      - --l2-engine-rpc=http://127.0.0.1:8571
       - --l2-engine-jwt-secret=/data/jwt.hex
       - --rpc.port=9565
       - --p2p.listen.tcp=9242

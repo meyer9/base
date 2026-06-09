@@ -19,6 +19,7 @@ pub use engine::{
     EngineClientResult, EngineConfig, EngineDerivationClient, EngineError, EngineProcessor,
     EngineProcessorOptions, EngineRequestReceiver, EngineRpcProcessor, EngineRpcRequest,
     GetPayloadRequest, InsertUnsafePayloadRequest, QueuedEngineDerivationClient, ResetRequest,
+    UnsafeL2BlockRequest,
 };
 
 mod rpc;

@@ -8,6 +8,7 @@ use libp2p::TransportError;
 use thiserror::Error;
 use tokio::{self, select, sync::mpsc};
 use tokio_util::sync::{CancellationToken, WaitForCancellationFuture};
+use tracing::Instrument;
 
 use crate::{
     CancellableContext, NetworkEngineClient, NodeActor,
@@ -195,7 +196,17 @@ where
                         error!(target: "node::p2p", "The gossip transport has closed");
                         return Err(NetworkActorError::ChannelClosed);
                     };
-                    if self.engine_client.send_unsafe_block(block.into()).await.is_err() {
+                    let span = info_span!(
+                        "gossip_unsafe_block",
+                        "otel.kind" = "consumer",
+                    );
+                    if self
+                        .engine_client
+                        .send_unsafe_block(block.into())
+                        .instrument(span)
+                        .await
+                        .is_err()
+                    {
                         warn!(target: "network", "Failed to forward unsafe block to engine");
                         return Err(NetworkActorError::ChannelClosed);
                     }

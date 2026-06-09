@@ -62,6 +62,7 @@ http-body.workspace = true
 tokio-util.workspace = true
 opentelemetry.workspace = true
 async-trait.workspace = true
+tracing-opentelemetry.workspace = true
 async-stream.workspace = true
 tokio-stream.workspace = true
 libp2p-stream.workspace = true

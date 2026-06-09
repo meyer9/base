@@ -9,6 +9,7 @@
 
 use std::{
     future::Future,
+    pin::Pin,
     task::{Context as TaskContext, Poll},
 };
 
@@ -18,6 +19,7 @@ use opentelemetry::{Context, global, trace::TraceContextExt};
 use opentelemetry_http::HeaderExtractor;
 use tower::{Layer, Service};
 use tracing::Instrument;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// Inbound [`opentelemetry::Context`] extracted from request headers.
 #[derive(Clone, Debug)]
@@ -44,10 +46,11 @@ pub struct OtelHttpMiddleware<S> {
 impl<S, ReqBody, ResBody> Service<Request<ReqBody>> for OtelHttpMiddleware<S>
 where
     S: Service<Request<ReqBody>, Response = Response<ResBody>>,
+    S::Future: Send + 'static,
 {
     type Response = S::Response;
     type Error = S::Error;
-    type Future = S::Future;
+    type Future = Pin<Box<dyn Future<Output = Result<S::Response, S::Error>> + Send>>;
 
     fn poll_ready(&mut self, cx: &mut TaskContext<'_>) -> Poll<Result<(), Self::Error>> {
         self.inner.poll_ready(cx)
@@ -58,11 +61,25 @@ where
             propagator.extract(&HeaderExtractor(req.headers()))
         });
 
-        if cx.span().span_context().is_valid() {
-            req.extensions_mut().insert(InboundOtelContext(cx));
+        let parent = if cx.span().span_context().is_valid() {
+            req.extensions_mut().insert(InboundOtelContext(cx.clone()));
+            Some(cx)
+        } else {
+            None
+        };
+
+        let span = tracing::info_span!(
+            "http_request",
+            "otel.kind" = "server",
+            "http.method" = %req.method(),
+            "url.path" = %req.uri().path(),
+        );
+        if let Some(parent_cx) = parent {
+            let _ = span.set_parent(parent_cx);
         }
 
-        self.inner.call(req)
+        let fut = self.inner.call(req).instrument(span);
+        Box::pin(fut)
     }
 }
 

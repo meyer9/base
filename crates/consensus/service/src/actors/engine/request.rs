@@ -57,7 +57,7 @@ pub enum EngineActorRequest {
     /// Request to finalize the L2 block at the provided block number.
     ProcessFinalizedL2BlockNumberRequest(Box<u64>),
     /// Request to insert the provided external unsafe block.
-    ProcessUnsafeL2BlockRequest(Box<BaseExecutionPayloadEnvelope>),
+    ProcessUnsafeL2BlockRequest(Box<UnsafeL2BlockRequest>),
     /// Request to insert a locally produced sequencer unsafe block.
     ProcessLocalUnsafeL2BlockRequest(Box<InsertUnsafePayloadRequest>),
     /// Request to reset engine forkchoice.
@@ -99,6 +99,17 @@ pub struct InsertUnsafePayloadRequest {
     pub envelope: BaseExecutionPayloadEnvelope,
     /// Optional response channel used by the sequencer to wait for actual insertion.
     pub result_tx: Option<mpsc::Sender<Result<L2BlockInfo, InsertTaskError>>>,
+    /// [`opentelemetry::Context`] from the requester, for trace propagation.
+    pub otel_cx: Context,
+}
+
+/// A request to insert an unsafe payload received from the network (gossip).
+/// Unlike [`InsertUnsafePayloadRequest`], this request has no response channel:
+/// the caller does not wait for the engine to acknowledge insertion.
+#[derive(Debug)]
+pub struct UnsafeL2BlockRequest {
+    /// The payload envelope to insert.
+    pub envelope: BaseExecutionPayloadEnvelope,
     /// [`opentelemetry::Context`] from the requester, for trace propagation.
     pub otel_cx: Context,
 }

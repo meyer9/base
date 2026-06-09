@@ -3,8 +3,12 @@ use std::fmt::Debug;
 use async_trait::async_trait;
 use base_common_rpc_types_engine::BaseExecutionPayloadEnvelope;
 use tokio::sync::mpsc;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-use crate::{EngineActorRequest, EngineClientError, EngineClientResult};
+use crate::{
+    EngineActorRequest, EngineClientError, EngineClientResult,
+    actors::engine::UnsafeL2BlockRequest,
+};
 
 /// Client used to interact with the Engine.
 #[cfg_attr(test, mockall::automock)]
@@ -32,9 +36,13 @@ impl NetworkEngineClient for QueuedNetworkEngineClient {
         block: BaseExecutionPayloadEnvelope,
     ) -> EngineClientResult<()> {
         trace!(target: "network", ?block, "Sending unsafe block to engine.");
+        let otel_cx = tracing::Span::current().context();
         Ok(self
             .engine_actor_request_tx
-            .send(EngineActorRequest::ProcessUnsafeL2BlockRequest(Box::new(block)))
+            .send(EngineActorRequest::ProcessUnsafeL2BlockRequest(Box::new(UnsafeL2BlockRequest {
+                envelope: block,
+                otel_cx,
+            })))
             .await
             .map_err(|_| EngineClientError::RequestError("request channel closed.".to_string()))?)
     }

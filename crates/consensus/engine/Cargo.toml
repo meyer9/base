@@ -46,6 +46,7 @@ async-trait.workspace = true
 http-body-util.workspace = true
 opentelemetry.workspace = true
 opentelemetry-http = { workspace = true, features = ["hyper"] }
+tracing-opentelemetry.workspace = true
 serde = { workspace = true, features = ["std"] }
 tracing = { workspace = true, features = ["std"] }
 thiserror = { workspace = true, features = ["std"] }

@@ -4045,6 +4045,7 @@ dependencies = [
  "tokio-tungstenite 0.28.0",
  "tower 0.5.3",
  "tracing",
+ "tracing-opentelemetry 0.32.1",
  "url",
 ]
 
@@ -4155,6 +4156,7 @@ dependencies = [
  "tower 0.5.3",
  "tower-http",
  "tracing",
+ "tracing-opentelemetry 0.32.1",
  "url",
 ]
 
@@ -4612,6 +4614,7 @@ dependencies = [
  "tokio",
  "tower 0.5.3",
  "tracing",
+ "tracing-opentelemetry 0.32.1",
 ]
 
 [[package]]
