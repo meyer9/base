@@ -4,7 +4,7 @@ use base_common_consensus::BasePrimitives;
 use base_engine_tree::BaseEngineValidatorBuilder;
 use base_execution_chainspec::BaseChainSpec;
 use base_execution_payload_builder::config::{BaseDAConfig, GasLimitConfig};
-use base_execution_rpc::eth::BaseEthApiBuilder;
+use base_execution_rpc::{OtelHttpMiddlewareLayer, OtelRpcMiddlewareLayer, eth::BaseEthApiBuilder};
 use base_node_core::{
     BaseConsensusBuilder, BaseEngineApiBuilder, BaseEngineTypes, BaseExecutorBuilder,
     BaseNetworkBuilder, BaseNodeComponentBuilder, BaseNodeTypes, BasePayloadValidatorBuilder,
@@ -172,6 +172,8 @@ where
         BasePayloadValidatorBuilder,
         BaseEngineApiBuilder<BasePayloadValidatorBuilder>,
         BaseEngineValidatorBuilder<BasePayloadValidatorBuilder>,
+        OtelRpcMiddlewareLayer,
+        OtelHttpMiddlewareLayer,
     >;
 
     fn components_builder(&self) -> Self::ComponentsBuilder {
@@ -179,7 +181,10 @@ where
     }
 
     fn add_ons(&self) -> Self::AddOns {
-        self.add_ons_builder().build()
+        self.add_ons_builder()
+            .with_rpc_middleware(OtelRpcMiddlewareLayer)
+            .with_http_middleware(OtelHttpMiddlewareLayer)
+            .build()
     }
 }
 
