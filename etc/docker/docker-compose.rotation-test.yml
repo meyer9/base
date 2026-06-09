@@ -14,6 +14,7 @@ services:
       - --http
       - --http.addr=0.0.0.0
       - --http.port=8545
+      - --http.api=eth,net,web3,admin
       - --authrpc.addr=0.0.0.0
       - --authrpc.port=8551
       - --authrpc.jwtsecret=/data/jwt.hex
@@ -39,6 +40,7 @@ services:
       - --http
       - --http.addr=0.0.0.0
       - --http.port=8555
+      - --http.api=eth,net,web3,admin
       - --authrpc.addr=0.0.0.0
       - --authrpc.port=8561
       - --authrpc.jwtsecret=/data/jwt.hex
@@ -64,6 +66,7 @@ services:
       - --http
       - --http.addr=0.0.0.0
       - --http.port=8565
+      - --http.api=eth,net,web3,admin
       - --authrpc.addr=0.0.0.0
       - --authrpc.port=8571
       - --authrpc.jwtsecret=/data/jwt.hex
