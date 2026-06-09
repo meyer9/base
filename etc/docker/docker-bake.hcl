@@ -67,6 +67,11 @@ target "client" {
   inherits = ["_rust-service-common"]
   target = "client"
   tags = ["base-reth-node:local"]
+  cache-from = [
+    "type=registry,ref=${REGISTRY_IMAGE}:cache-${PLATFORM_PAIR}",
+    "type=local,src=/tmp/docker-cache-client",
+  ]
+  cache-to = ["type=local,dest=/tmp/docker-cache-client,mode=max"]
 }
 
 target "base" {
@@ -92,7 +97,9 @@ target "consensus" {
   cache-from = [
     "type=registry,ref=${REGISTRY_IMAGE}:cache-${PLATFORM_PAIR}",
     "type=registry,ref=${REGISTRY_IMAGE}:cache-consensus-${PLATFORM_PAIR}",
+    "type=local,src=/tmp/docker-cache-consensus",
   ]
+  cache-to = ["type=local,dest=/tmp/docker-cache-consensus,mode=max"]
 }
 
 target "proposer" {
