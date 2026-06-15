@@ -17,8 +17,19 @@ use http::{Request, Response};
 use jsonrpsee_core::middleware::{Batch, Notification, Request as RpcRequest, RpcServiceT};
 use opentelemetry::{Context, global, trace::TraceContextExt};
 use opentelemetry_http::HeaderExtractor;
+use pin_project_lite::pin_project;
 use tower::{Layer, Service};
 use tracing::Instrument;
+
+pin_project! {
+    /// Future wrapper that keeps an extracted OTel context attached while the request is polled.
+    #[derive(Debug)]
+    pub struct OtelHttpMiddlewareFuture<F> {
+        #[pin]
+        inner: F,
+        otel_cx: Option<InboundOtelContext>,
+    }
+}
 
 /// Inbound [`opentelemetry::Context`] extracted from request headers.
 #[derive(Clone, Debug)]
@@ -69,13 +80,6 @@ where
     }
 }
 
-/// Future wrapper that keeps an extracted OTel context attached while the request is polled.
-#[derive(Debug)]
-pub struct OtelHttpMiddlewareFuture<F> {
-    inner: F,
-    otel_cx: Option<InboundOtelContext>,
-}
-
 impl<F> Future for OtelHttpMiddlewareFuture<F>
 where
     F: Future,
@@ -85,10 +89,10 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
         // Keep the inbound context current while the auth/engine request future is polled so
         // handler spans created inside that future inherit the caller's traceparent.
-        let this = unsafe { self.get_unchecked_mut() };
+        let this = self.project();
         let _guard =
             this.otel_cx.as_ref().cloned().map(|InboundOtelContext(otel_cx)| otel_cx.attach());
-        unsafe { Pin::new_unchecked(&mut this.inner) }.poll(cx)
+        this.inner.poll(cx)
     }
 }
 
