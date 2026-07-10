@@ -47,6 +47,7 @@ pub use actors::{
 };
 
 mod metrics;
+pub mod test_utils;
 #[cfg(test)]
 pub use actors::{
     MockConductor, MockEngineDerivationClient, MockOriginSelector, MockSequencerEngineClient,
