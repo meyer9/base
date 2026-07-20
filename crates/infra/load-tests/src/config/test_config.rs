@@ -55,8 +55,22 @@ pub struct TestConfig {
     /// Maximum in-flight transactions per sender.
     pub in_flight_per_sender: u32,
 
+    /// Enables open-loop submission mode with pre-signed transactions.
+    #[serde(default)]
+    pub open_loop: bool,
+
+    /// Number of transactions to pre-sign per sender in open-loop mode.
+    #[serde(default)]
+    pub prefill_per_sender: u32,
+
     /// Number of transactions to batch together before submitting to the RPC.
     pub batch_size: u32,
+
+    /// Number of transactions to batch together when funding/setup phases submit from a single
+    /// funder account. Kept below the target txpool's per-sender slot limit (e.g. reth default is
+    /// 16) to avoid "txpool is full" rejections.
+    #[serde(default = "default_funding_batch_size")]
+    pub funding_batch_size: u32,
 
     /// Maximum time to wait for a batch to fill before flushing (e.g., "50ms", "200ms").
     pub batch_timeout: Option<String>,
@@ -110,6 +124,14 @@ pub struct TestConfig {
     /// Optional real-token setup for mainnet-snapshot bidirectional swap workloads.
     #[serde(default)]
     pub real_token_setup: Option<RealTokenSetupConfig>,
+
+    /// Skip draining native ETH balances back to the funder account after the run.
+    ///
+    /// Useful for harness-driven runs (e.g. via `base-bench`) that only ever pass a
+    /// config file path with no CLI flags, since funder accounts are cheaply
+    /// re-funded via deposit rather than reclaimed.
+    #[serde(default)]
+    pub skip_drain: bool,
 }
 
 impl Default for TestConfig {
@@ -126,7 +148,10 @@ impl Default for TestConfig {
             sender_count: 100,
             sender_offset: 0,
             in_flight_per_sender: 256,
+            open_loop: false,
+            prefill_per_sender: 0,
             batch_size: 50,
+            funding_batch_size: default_funding_batch_size(),
             batch_timeout: Some("100ms".to_string()),
             duration: Some("60s".to_string()),
             target_gps: Some(20_000_000),
@@ -138,6 +163,7 @@ impl Default for TestConfig {
             swap_token_amount: default_swap_token_amount(),
             b20_mint_amount: default_b20_mint_amount(),
             real_token_setup: None,
+            skip_drain: false,
         }
     }
 }
@@ -154,6 +180,9 @@ impl fmt::Debug for TestConfig {
             .field("sender_count", &self.sender_count)
             .field("sender_offset", &self.sender_offset)
             .field("in_flight_per_sender", &self.in_flight_per_sender)
+            .field("open_loop", &self.open_loop)
+            .field("prefill_per_sender", &self.prefill_per_sender)
+            .field("funding_batch_size", &self.funding_batch_size)
             .field("duration", &self.duration)
             .field("target_gps", &self.target_gps)
             .field("seed", &self.seed)
@@ -164,6 +193,7 @@ impl fmt::Debug for TestConfig {
             .field("swap_token_amount", &self.swap_token_amount)
             .field("b20_mint_amount", &self.b20_mint_amount)
             .field("real_token_setup", &self.real_token_setup)
+            .field("skip_drain", &self.skip_drain)
             .finish()
     }
 }
@@ -267,6 +297,13 @@ pub enum TxTypeConfig {
     /// per run during setup.
     B20,
 
+    /// B-20 EVM contract token transfer. Requires a pre-deployed contract and DB-seeded sender
+    /// balances.
+    B20Evm {
+        /// Pre-deployed EVM token contract address.
+        contract: String,
+    },
+
     /// Aerodrome Slipstream (concentrated liquidity) swap.
     AerodromeCl {
         /// CL Router contract address.
@@ -328,6 +365,10 @@ const fn default_uniswap_v3_fee() -> u32 {
 
 const fn default_aerodrome_tick_spacing() -> i32 {
     100
+}
+
+const fn default_funding_batch_size() -> u32 {
+    16
 }
 
 fn default_swap_token_amount() -> String {
@@ -507,6 +548,7 @@ impl TestConfig {
             sender_offset: self.sender_offset,
             in_flight_per_sender: self.in_flight_per_sender,
             batch_size: self.batch_size,
+            funding_batch_size: self.funding_batch_size,
             batch_timeout: self.batch_timeout.clone(),
             duration: self.duration.clone(),
             target_gps: self.target_gps,
@@ -586,6 +628,7 @@ impl TestConfig {
             duration,
             max_in_flight_per_sender: self.in_flight_per_sender as u64,
             batch_size: self.batch_size.max(1) as usize,
+            funding_batch_size: self.funding_batch_size.max(1) as usize,
             batch_timeout,
             max_gas_price: crate::runner::DEFAULT_MAX_GAS_PRICE,
             flashblocks_ws: self
@@ -593,6 +636,8 @@ impl TestConfig {
                 .clone()
                 .ok_or_else(|| BaselineError::Config("flashblocks_ws is required".into()))?,
             fresh_recipient_ratio: self.fresh_recipient_ratio,
+            open_loop: self.open_loop,
+            prefill_per_sender: self.prefill_per_sender,
         })
     }
 
@@ -643,6 +688,10 @@ impl TestConfig {
                 }
             }
             TxTypeConfig::B20 => TxType::B20,
+            TxTypeConfig::B20Evm { contract } => {
+                let address = parse_address(contract, "b20_evm contract")?;
+                TxType::B20Evm { contract: address }
+            }
             TxTypeConfig::Osaka { target } => TxType::Osaka { target: target.clone() },
             TxTypeConfig::UniswapV3 {
                 router,
