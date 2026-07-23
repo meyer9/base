@@ -43,17 +43,23 @@ pub fn b20_balance_slot(who: Address) -> B256 {
 pub const B20_INITIALIZED_SLOT: B256 =
     b256!("c78b71fee795ddd74aff64ea9b2474194c938c3196430e10bb5f01ed4843400e");
 
-/// Fixed address where the MockB20Asset EVM contract is deployed for benchmarking.
+/// Fixed address where the `MockB20Asset` EVM contract is deployed for benchmarking.
 pub const EVM_TOKEN_ADDRESS: Address = address!("b200000000000000000000000000000000000ee2");
 
 /// Deployed bytecode of `MockB20Asset` (compiled from `base-std`), embedded at build time.
 pub const MOCK_B20_ASSET_BYTECODE: &[u8] = include_bytes!("mock_b20_asset.bin");
 
 /// Returns the balance storage slot for `who` in a standard EVM ERC-20 (`_balances` at slot 0).
-pub fn evm_erc20_balance_slot(who: Address) -> B256 {
+pub fn evm_balance_slot(who: Address, mapping_slot: u32) -> B256 {
     let mut buf = [0u8; 64];
     buf[12..32].copy_from_slice(who.as_slice());
+    buf[60..64].copy_from_slice(&mapping_slot.to_be_bytes());
     keccak256(buf)
+}
+
+/// Returns the balance storage slot for `who` in a standard EVM ERC-20 (`_balances` at slot 0).
+pub fn evm_erc20_balance_slot(who: Address) -> B256 {
+    evm_balance_slot(who, 0)
 }
 
 /// Derives the B20 Asset token address from a creator and a salt.
@@ -114,6 +120,8 @@ mod tests {
         let a = address_for_index(0);
         assert_eq!(b20_balance_slot(a), b20_balance_slot(a));
         assert_ne!(b20_balance_slot(a), b20_balance_slot(address_for_index(1)));
+        assert_eq!(evm_erc20_balance_slot(a), evm_balance_slot(a, 0));
+        assert_ne!(evm_balance_slot(a, 0), evm_balance_slot(a, 1));
     }
 
     #[test]

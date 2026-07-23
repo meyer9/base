@@ -3,12 +3,12 @@
 use crate::StorageTrieVersion;
 use crate::cli::PopulateArgs;
 use crate::storage::{
-    B20_DECIMALS_SLOT, B20_INITIALIZED_SLOT, B20_MULTIPLIER_SLOT, B20_SUPPLY_CAP_SLOT,
-    B20_TOTAL_SUPPLY_SLOT, EVM_TOKEN_ADDRESS, MOCK_B20_ASSET_BYTECODE, address_for_index,
-    b20_balance_slot, derive_b20_asset_address, derive_sender_addresses,
+    B20_DECIMALS_SLOT, B20_MULTIPLIER_SLOT, B20_SUPPLY_CAP_SLOT, B20_TOTAL_SUPPLY_SLOT,
+    address_for_index, b20_balance_slot, derive_b20_asset_address, derive_sender_addresses,
+    evm_balance_slot,
 };
-use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
-use eyre::{Result, WrapErr};
+use alloy_primitives::{Address, B256, U256, keccak256};
+use eyre::{Result, WrapErr, bail};
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use reth_db::{ClientVersion, Database, mdbx::DatabaseArguments, open_db};
@@ -17,7 +17,7 @@ use reth_db_api::{
     tables,
     transaction::{DbTx, DbTxMut},
 };
-use reth_primitives_traits::{Account, Bytecode, StorageEntry};
+use reth_primitives_traits::{Account, StorageEntry};
 use reth_trie::{HashedPostState, StateRoot, StorageRoot};
 use reth_trie_db::{
     DatabaseHashedCursorFactory, DatabaseStateRoot, DatabaseStorageRoot, DatabaseStorageTrieCursor,
@@ -38,14 +38,11 @@ pub struct Populator;
 impl Populator {
     /// Runs the full populate pipeline against the given datadir.
     pub fn run(args: PopulateArgs) -> Result<()> {
-        let token_addr = derive_b20_asset_address(args.creator, args.salt);
-        let hashed_token = keccak256(token_addr);
-        info!(
-            token = %token_addr,
-            hashed = %hashed_token,
-            count = args.count,
-            "starting B20 state population"
-        );
+        if args.contract.is_none() && (args.creator.is_none() || args.salt.is_none()) {
+            bail!(
+                "provide --contract for generic EVM contract population, or provide both --creator and --salt for B20 precompile population"
+            )
+        }
 
         let db = open_db(args.datadir.join("db"), DatabaseArguments::new(ClientVersion::default()))
             .wrap_err("open MDBX database")?;
@@ -55,9 +52,8 @@ impl Populator {
             StorageTrieVersion::detect(&tx).wrap_err("detect storage settings")?
         };
 
-        let evm_count = args.evm_contract.then(|| args.evm_count.unwrap_or(args.count));
         let account_count = if args.populate_accounts {
-            let n = args.account_count.or(evm_count).unwrap_or(args.count);
+            let n = args.account_count.unwrap_or(args.count);
             Some(n)
         } else {
             None
@@ -68,16 +64,36 @@ impl Populator {
                 .wrap_err("write plain accounts")?;
         }
 
-        if !args.skip_precompile {
+        let should_populate_precompile = args.contract.is_none() && !args.skip_precompile;
+
+        if should_populate_precompile {
+            let creator = args.creator.expect("validated above");
+            let salt = args.salt.expect("validated above");
+            let token_addr = derive_b20_asset_address(creator, salt);
+            let hashed_token = keccak256(token_addr);
+            info!(
+                token = %token_addr,
+                hashed = %hashed_token,
+                count = args.count,
+                "starting B20 precompile state population"
+            );
+
             if !args.trie_only {
                 let total_supply = args.balance.saturating_mul(U256::from(args.count));
                 Self::write_account(&db, token_addr, hashed_token, None)
                     .wrap_err("write precompile token account")?;
                 Self::clear_token_storage(&db, token_addr, hashed_token)
                     .wrap_err("clear existing precompile token storage")?;
-                Self::write_balance_slots(&db, token_addr, hashed_token, args.count, args.balance)
-                    .wrap_err("write balance slots")?;
-                Self::write_metadata_slots(&db, token_addr, hashed_token, total_supply, false)
+                Self::write_balance_slots(
+                    &db,
+                    token_addr,
+                    hashed_token,
+                    args.count,
+                    args.balance,
+                    None,
+                )
+                .wrap_err("write balance slots")?;
+                Self::write_metadata_slots(&db, token_addr, hashed_token, total_supply)
                     .wrap_err("write precompile metadata slots")?;
             }
             Self::compute_and_write_storage_trie(&db, hashed_token, storage_trie_version)
@@ -87,47 +103,49 @@ impl Populator {
                     .wrap_err("update account trie")?;
             }
         } else {
-            info!("skipping B20 precompile token (--skip-precompile set)");
+            info!("skipping B20 precompile token");
         }
 
-        if let Some(evm_n) = evm_count {
-            info!(token = %EVM_TOKEN_ADDRESS, count = evm_n, "populating EVM contract token");
-            let hashed_evm = keccak256(EVM_TOKEN_ADDRESS);
-            let total_supply = args.balance.saturating_mul(U256::from(evm_n));
-
-            let bytecode_hash = keccak256(MOCK_B20_ASSET_BYTECODE);
+        if let Some(contract_addr) = args.contract {
+            info!(
+                token = %contract_addr,
+                count = args.count,
+                mapping_slot = args.mapping_slot,
+                "populating EVM contract storage"
+            );
+            let hashed_contract = keccak256(contract_addr);
             if !args.trie_only {
-                Self::write_bytecode(&db).wrap_err("write bytecode")?;
-                Self::write_account(&db, EVM_TOKEN_ADDRESS, hashed_evm, Some(bytecode_hash))
-                    .wrap_err("write EVM token account")?;
-                Self::clear_token_storage(&db, EVM_TOKEN_ADDRESS, hashed_evm)
+                Self::write_account(&db, contract_addr, hashed_contract, None)
+                    .wrap_err("write EVM contract account")?;
+                Self::clear_token_storage(&db, contract_addr, hashed_contract)
                     .wrap_err("clear existing EVM token storage")?;
-                Self::write_balance_slots(&db, EVM_TOKEN_ADDRESS, hashed_evm, evm_n, args.balance)
-                    .wrap_err("write EVM balance slots")?;
+                Self::write_balance_slots(
+                    &db,
+                    contract_addr,
+                    hashed_contract,
+                    args.count,
+                    args.balance,
+                    Some(args.mapping_slot),
+                )
+                .wrap_err("write EVM balance slots")?;
                 if let (Some(seed), Some(sender_count)) = (args.seed, args.sender_count) {
                     Self::write_sender_balances(
                         &db,
-                        EVM_TOKEN_ADDRESS,
-                        hashed_evm,
+                        contract_addr,
+                        hashed_contract,
                         args.balance,
                         seed,
                         sender_count as usize,
+                        Some(args.mapping_slot),
                     )
                     .wrap_err("write sender balance slots")?;
                 }
-                Self::write_metadata_slots(&db, EVM_TOKEN_ADDRESS, hashed_evm, total_supply, true)
-                    .wrap_err("write EVM metadata slots")?;
             }
-            Self::compute_and_write_storage_trie(&db, hashed_evm, storage_trie_version)
+            Self::compute_and_write_storage_trie(&db, hashed_contract, storage_trie_version)
                 .wrap_err("compute + write EVM storage trie")?;
             if account_count.is_none() {
-                Self::update_account_trie(
-                    &db,
-                    hashed_evm,
-                    Some(bytecode_hash),
-                    storage_trie_version,
-                )
-                .wrap_err("update EVM account trie")?;
+                Self::update_account_trie(&db, hashed_contract, None, storage_trie_version)
+                    .wrap_err("update EVM account trie")?;
             }
         }
 
@@ -195,7 +213,6 @@ impl Populator {
         token_addr: Address,
         hashed_token: B256,
         total_supply: U256,
-        is_evm_contract: bool,
     ) -> Result<()> {
         let tx = db.tx_mut().wrap_err("begin metadata tx")?;
         let mut ps_cursor = tx
@@ -205,15 +222,12 @@ impl Populator {
             tx.cursor_dup_write::<tables::HashedStorages>().wrap_err("open HashedStorages")?;
 
         let multiplier = U256::from(1u64) * U256::from(10u64).pow(U256::from(18u64));
-        let mut meta: Vec<(B256, U256)> = vec![
+        let meta: Vec<(B256, U256)> = vec![
             (B20_TOTAL_SUPPLY_SLOT, total_supply),
             (B20_SUPPLY_CAP_SLOT, total_supply),
             (B20_DECIMALS_SLOT, U256::from(18u8)),
             (B20_MULTIPLIER_SLOT, multiplier),
         ];
-        if is_evm_contract {
-            meta.push((B20_INITIALIZED_SLOT, U256::from(1u8)));
-        }
 
         for (slot, value) in &meta {
             ps_cursor
@@ -231,10 +245,10 @@ impl Populator {
 
     /// Writes all `count` balance slots using a single-scan globally-sorted append.
     ///
-    /// Generates all (plain_slot, hashed_slot) pairs in one rayon parallel pass,
+    /// Generates all (`plain_slot`, `hashed_slot`) pairs in one rayon parallel pass,
     /// sorts each list independently, then writes each to the corresponding MDBX table
     /// in commit-sized chunks. Sequential sorted appends let MDBX extend leaf pages
-    /// linearly without B-tree splits, avoiding exponential ZFS CoW write amplification.
+    /// linearly without B-tree splits, avoiding exponential ZFS `CoW` write amplification.
     ///
     /// Memory: ~(count × 32 bytes) per table. For 700M entries, ~22 GB per table (44 GB
     /// total). Requires sufficient RAM; the machine must have ~50+ GB available.
@@ -244,12 +258,19 @@ impl Populator {
         hashed_token: B256,
         count: u64,
         balance: U256,
+        mapping_slot: Option<u32>,
     ) -> Result<()> {
         const COMMIT_CHUNK: usize = 10_000_000;
 
         info!(count, "generating and sorting plain slots");
-        let mut plain_entries: Vec<B256> =
-            (0..count).into_par_iter().map(|i| b20_balance_slot(address_for_index(i))).collect();
+        let mut plain_entries: Vec<B256> = (0..count)
+            .into_par_iter()
+            .map(|i| {
+                let addr = address_for_index(i);
+                mapping_slot
+                    .map_or_else(|| b20_balance_slot(addr), |slot| evm_balance_slot(addr, slot))
+            })
+            .collect();
         plain_entries.par_sort_unstable();
 
         info!(count, "writing PlainStorageState");
@@ -280,7 +301,12 @@ impl Populator {
         info!(count, "generating and sorting hashed slots");
         let mut hashed_entries: Vec<B256> = (0..count)
             .into_par_iter()
-            .map(|i| keccak256(b20_balance_slot(address_for_index(i))))
+            .map(|i| {
+                let addr = address_for_index(i);
+                let plain_slot = mapping_slot
+                    .map_or_else(|| b20_balance_slot(addr), |slot| evm_balance_slot(addr, slot));
+                keccak256(plain_slot)
+            })
             .collect();
         hashed_entries.par_sort_unstable();
 
@@ -441,16 +467,6 @@ impl Populator {
         Ok(())
     }
 
-    fn write_bytecode(db: &reth_db::DatabaseEnv) -> Result<B256> {
-        let bytecode_hash = keccak256(MOCK_B20_ASSET_BYTECODE);
-        let bytecode = Bytecode::new_raw(Bytes::from_static(MOCK_B20_ASSET_BYTECODE));
-        let tx = db.tx_mut().wrap_err("begin bytecode tx")?;
-        tx.put::<tables::Bytecodes>(bytecode_hash, bytecode).wrap_err("write bytecode")?;
-        tx.commit().wrap_err("commit bytecode tx")?;
-        info!(hash = %bytecode_hash, "wrote MockB20Asset bytecode");
-        Ok(bytecode_hash)
-    }
-
     fn write_sender_balances(
         db: &reth_db::DatabaseEnv,
         token_addr: Address,
@@ -458,6 +474,7 @@ impl Populator {
         balance: U256,
         seed: u64,
         sender_count: usize,
+        mapping_slot: Option<u32>,
     ) -> Result<()> {
         let sender_addresses = derive_sender_addresses(seed, sender_count);
         info!(count = sender_count, "writing sender balance slots");
@@ -470,7 +487,8 @@ impl Populator {
             tx.cursor_dup_write::<tables::HashedStorages>().wrap_err("open HashedStorages")?;
 
         for addr in &sender_addresses {
-            let plain_slot = b20_balance_slot(*addr);
+            let plain_slot = mapping_slot
+                .map_or_else(|| b20_balance_slot(*addr), |slot| evm_balance_slot(*addr, slot));
             let hashed_slot = keccak256(plain_slot);
             ps_cursor
                 .upsert(token_addr, &StorageEntry { key: plain_slot, value: balance })
@@ -488,7 +506,7 @@ impl Populator {
     /// Phase 1 of account writing: write synthetic EOA accounts to `PlainAccountState` only.
     ///
     /// Writing `HashedAccounts` here would require a sorted scan of all 469K existing leaf
-    /// pages per chunk (60 GB of ZFS CoW I/O, repeated 700 times = ~93 hours). Instead,
+    /// pages per chunk (60 GB of ZFS `CoW` I/O, repeated 700 times = ~93 hours). Instead,
     /// `rebuild_hashed_accounts` does a single 16-pass scan of `PlainAccountState` to
     /// build `HashedAccounts` in ~9 minutes.
     fn write_plain_accounts(
@@ -541,7 +559,7 @@ impl Populator {
     /// Phase 2 of account writing: rebuild `HashedAccounts` by scanning `PlainAccountState`
     /// in 16 passes, one hash-space slice per pass.
     ///
-    /// Each pass only touches 1/16 of the existing mainnet pages (3.75 GB of CoW I/O), and
+    /// Each pass only touches 1/16 of the existing mainnet pages (3.75 GB of `CoW` I/O), and
     /// distributes the 60 GB total over 16 passes instead of repeating it 700 times.
     /// Estimated total time: ~9 minutes vs ~93 hours for per-chunk writes.
     fn rebuild_hashed_accounts(db: &reth_db::DatabaseEnv) -> Result<()> {
