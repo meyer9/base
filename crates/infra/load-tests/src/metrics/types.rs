@@ -261,4 +261,7 @@ pub struct ConfigSummary {
     /// Real-token setup configuration, when enabled.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub real_token_setup: Option<serde_json::Value>,
+    /// x402 batch-settlement setup configuration, when enabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batch_settlement: Option<serde_json::Value>,
 }

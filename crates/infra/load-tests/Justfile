@@ -7,6 +7,7 @@
 #   just load-test continuous sepolia                    - Load test sepolia indefinitely
 #   just load-test real-token                            - Real-token swap load test on devnet
 #   just load-test real-token sepolia                    - Real-token swap load test on sepolia
+#   just load-test batch-settlement                      - x402 batch-settlement load test on devnet
 #   just load-test recover                               - Recover funds from devnet test accounts
 #   just load-test recover sepolia                       - Recover funds from sepolia test accounts
 #   just load-test real-token-recover sepolia            - Recover real-token funds from sepolia test accounts
@@ -81,6 +82,63 @@ real-token network='devnet' *args:
         "$template" > "$rendered_config"
 
     echo "Running real-token devnet load test with rendered config: $rendered_config"
+    cargo run -p base-load-tester-bin --bin base-load-tester -- "$rendered_config" {{args}}
+
+# Run x402 batch-settlement load test on devnet.
+#
+# Deploys the FiatTokenV2_2 ERC-3009 fixture + x402BatchSettlement + ERC3009DepositCollector,
+# renders the run config with the deployed addresses, and runs the on-chain-only workload.
+batch-settlement network='devnet' *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    if [ "{{network}}" != "devnet" ]; then
+        echo "batch-settlement currently supports devnet only" >&2
+        exit 1
+    fi
+
+    if [ -z "${FUNDER_KEY:-}" ]; then
+        export FUNDER_KEY=0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d
+    fi
+
+    contracts_dir="crates/utilities/test-utils/contracts"
+    template="crates/infra/load-tests/examples/batch-settlement-devnet.yaml.template"
+    rendered_config="$(mktemp "${TMPDIR:-/tmp}/base-batch-settlement-devnet.XXXXXX")"
+    trap 'rm -f "$rendered_config"' EXIT
+
+    echo "Installing Foundry dependencies..."
+    (cd "$contracts_dir" && forge soldeer install)
+
+    echo "Deploying batch-settlement devnet harness..."
+    deploy_output="$(
+        cd "$contracts_dir"
+        forge script script/DeployBatchSettlementDevnet.s.sol:DeployBatchSettlementDevnet \
+            --rpc-url http://localhost:7545 \
+            --private-key "$FUNDER_KEY" \
+            --use 0.8.28 \
+            --evm-version cancun \
+            --optimize \
+            --optimizer-runs 200 \
+            --broadcast 2>&1
+    )"
+    printf '%s\n' "$deploy_output"
+
+    token="$(printf '%s\n' "$deploy_output" | awk '$1 == "Token:" { print $2; exit }')"
+    settlement="$(printf '%s\n' "$deploy_output" | awk '$1 == "Settlement:" { print $2; exit }')"
+    collector="$(printf '%s\n' "$deploy_output" | awk '$1 == "Collector:" { print $2; exit }')"
+
+    if [ -z "$token" ] || [ -z "$settlement" ] || [ -z "$collector" ]; then
+        echo "failed to parse deployed harness addresses from forge output" >&2
+        exit 1
+    fi
+
+    sed \
+        -e "s|__TOKEN__|$token|g" \
+        -e "s|__SETTLEMENT__|$settlement|g" \
+        -e "s|__COLLECTOR__|$collector|g" \
+        "$template" > "$rendered_config"
+
+    echo "Running batch-settlement devnet load test with rendered config: $rendered_config"
     cargo run -p base-load-tester-bin --bin base-load-tester -- "$rendered_config" {{args}}
 
 # Run load test against a network indefinitely (Ctrl-C to stop)

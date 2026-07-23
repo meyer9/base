@@ -65,6 +65,9 @@ impl WorkloadGenerator {
         let mut target: f64 = self.rng.gen_range(0.0..total);
 
         for (payload, share) in &self.payloads {
+            if *share <= 0.0 {
+                continue;
+            }
             target -= share;
             if target <= 0.0 {
                 return Ok(SelectedPayload { payload: Arc::clone(payload) });
@@ -99,5 +102,46 @@ impl std::fmt::Debug for WorkloadGenerator {
             .field("config", &self.config)
             .field("payloads_count", &self.payloads.len())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy_primitives::Address;
+
+    use super::*;
+
+    #[derive(Debug)]
+    struct NamedPayload(&'static str);
+
+    impl Payload for NamedPayload {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+
+        fn uses_runner_recipient(&self) -> bool {
+            false
+        }
+
+        fn generate(
+            &self,
+            _rng: &mut SeededRng,
+            _from: Address,
+            _to: Address,
+        ) -> TransactionRequest {
+            TransactionRequest::default()
+        }
+    }
+
+    #[test]
+    fn zero_weight_payload_is_never_selected() {
+        let mut generator = WorkloadGenerator::new(WorkloadConfig::default())
+            .with_payload(NamedPayload("disabled"), 0.0)
+            .with_payload(NamedPayload("enabled"), 100.0);
+
+        for _ in 0..10_000 {
+            let selected = generator.select_payload().expect("positive total weight");
+            assert_eq!(selected.payload.name(), "enabled");
+        }
     }
 }

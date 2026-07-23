@@ -4,8 +4,9 @@
 
 mod config;
 pub use config::{
-    OsakaTarget, PrecompileTarget, RealTokenAcquisitionConfig, RealTokenPairTokenConfig,
-    RealTokenSetupConfig, TestConfig, TxTypeConfig, WeightedTxType, WorkloadConfig,
+    BatchSettlementConfig, OsakaTarget, PrecompileTarget, RealTokenAcquisitionConfig,
+    RealTokenPairTokenConfig, RealTokenSetupConfig, TestConfig, TxTypeConfig, WeightedTxType,
+    WorkloadConfig,
 };
 
 mod executor;
@@ -33,15 +34,23 @@ pub use metrics::{
 
 mod workload;
 pub use workload::{
-    AccountPool, AerodromeClPayload, B20EvmTransferPayload, B20TransferPayload, CalldataPayload,
-    Erc20Payload, FundedAccount, KeyStream, OsakaPayload, Payload, PrecompileLooper,
-    PrecompilePayload, SeededRng, StoragePayload, TransferPayload, UniswapV3Payload,
-    WorkloadGenerator, parse_precompile_id,
+    AccountPool, AerodromeClPayload, B20EvmTransferPayload, B20TransferPayload,
+    BatchSettlementClaimPayload, BatchSettlementClaimWithSignaturePayload,
+    BatchSettlementDepositPayload, BatchSettlementRefundPayload, BatchSettlementSettlePayload,
+    CalldataPayload, ChannelBook, ChannelConfig, ChannelGroup, DEPOSIT_OPEN_GAS_LIMIT,
+    DEPOSIT_TOPUP_GAS_LIMIT, DepositAuth, Erc20Payload, FreshChannel, FundedAccount, KeyStream,
+    OsakaPayload, Payload, PrecompileLooper, PrecompilePayload, REFUND_GAS_LIMIT, Rung,
+    SETTLE_GAS_LIMIT, SETTLEMENT_DOMAIN_NAME, SETTLEMENT_DOMAIN_VERSION, SeededRng,
+    SenderChannels, SettlementDomain, StoragePayload, TOKEN_DOMAIN_NAME, TOKEN_DOMAIN_VERSION,
+    TokenDomain, TransferPayload, UniswapV3Payload, WorkloadGenerator, claim_gas_limit,
+    derive_channel_salt, derive_receiver, encode_collector_data, encode_deposit_call, erc3009_nonce,
+    make_channel_config, parse_precompile_id, sign_digest,
 };
 
 mod runner;
 pub use runner::{
-    AdaptiveBackoff, BatchTxError, BlockObservation, BlockReceipt, BlockWatcher,
+    AdaptiveBackoff, BatchSettlementParams, BatchTxError, BlockObservation, BlockReceipt,
+    BlockWatcher,
     DEFAULT_MAX_GAS_PRICE, DisplaySnapshot, FlashblockInclusion, FlashblockWatcher, LoadConfig,
     LoadRunner, LoadTestDisplay, MAX_FEE_BASE_FEE_MULTIPLIER, MAX_SENDER_WORKER_COUNT,
     MAX_SIGNER_WORKER_COUNT, PipelineQueue, PipelineStartConfig, PreparedBatch,

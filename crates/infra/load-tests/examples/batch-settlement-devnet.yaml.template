@@ -1,0 +1,62 @@
+# Load Test Configuration - Local Devnet x402 Batch Settlement
+#
+# This template is rendered by `just load-test batch-settlement`.
+# The command deploys the FiatTokenV2_2 ERC-3009 fixture, the x402BatchSettlement
+# contract, and the ERC3009DepositCollector, substitutes the addresses below, and
+# runs the rendered config.
+#
+# Scope is on-chain only: the workload reproduces the facilitator's would-be
+# on-chain payloads (claim / deposit / settle / refund) but does NOT run a
+# facilitator or its /verify step. See the plan's metrics section for how the
+# on-chain ceiling relates to end-to-end request throughput.
+
+transaction_submission_rpcs:
+  - "http://localhost:7545"
+query_rpc: "http://localhost:8545"
+txpool_nodes:
+  - "http://localhost:7545"
+  - "http://localhost:8545"
+flashblocks_ws: "ws://localhost:7111"
+
+sender_count: 10
+target_gps: 20000000
+in_flight_per_sender: 64
+batch_size: 20
+batch_timeout: "10ms"
+duration: "30s"
+seed: 987321
+
+# 0.5 ETH per account covers channel-open deposits plus claim/settle/refund gas.
+funding_amount: "500000000000000000"
+
+# Shared parameters for every batch_settlement_* transaction type. The three
+# addresses are substituted from the devnet deploy output.
+batch_settlement:
+  settlement_contract: "__SETTLEMENT__"
+  token: "__TOKEN__"
+  collector: "__COLLECTOR__"
+  channels_per_sender: 16
+  channels_per_claim: 8
+  fresh_channel_ratio: 0.25
+  deposit_amount: "1000000000" # 1000 USDC (1000e6)
+  # Sized for the 20M GPS / 30s run with a 25% safety margin.
+  claim_ladder_rungs: 128
+  topups_per_channel: 8
+  withdraw_delay_secs: 3600
+
+transactions:
+  # 90% cumulative claims authorized by a batch signature (the steady-state path).
+  - weight: 90
+    type: batch_settlement_claim_with_signature
+  # 5% deposits: open pre-provisioned fresh channels or top up warm ones.
+  - weight: 5
+    type: batch_settlement_deposit
+  # 4% settlement sweeps to the receiver.
+  - weight: 4
+    type: batch_settlement_settle
+  # 1% cooperative refunds of unclaimed escrow.
+  - weight: 1
+    type: batch_settlement_refund
+  # A/B slot: plain claim without a batch signature. Enable by raising the weight.
+  - weight: 0
+    type: batch_settlement_claim

@@ -188,8 +188,12 @@ impl LoadRunner {
 
         // Rebuild the generator now that the per-run salt is known, so the B-20 payload derives the
         // correct per-sender token addresses.
-        self.generator =
-            Self::create_generator(self.workload_config(), &self.config, Some(run_salt))?;
+        self.generator = Self::create_generator(
+            self.workload_config(),
+            &self.config,
+            Some(run_salt),
+            self.batch_settlement_book.as_ref(),
+        )?;
 
         info!(senders = total, amount = %amount_per_sender, "B-20 token setup complete");
         Ok(())

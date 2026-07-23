@@ -158,6 +158,11 @@ fn validate_real_token_pair_matches_swaps(
             | TxTypeConfig::B20Evm { .. }
             | TxTypeConfig::Precompile { .. }
             | TxTypeConfig::Storage { .. }
+            | TxTypeConfig::BatchSettlementClaimWithSignature
+            | TxTypeConfig::BatchSettlementClaim
+            | TxTypeConfig::BatchSettlementDeposit
+            | TxTypeConfig::BatchSettlementSettle
+            | TxTypeConfig::BatchSettlementRefund
             | TxTypeConfig::Osaka { .. } => continue,
         };
         saw_swap = true;

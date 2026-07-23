@@ -36,7 +36,7 @@ impl<'a> MetricsAggregator<'a> {
     ) -> MetricsSummary {
         let mut top_failure_reasons: Vec<(String, u64)> =
             submission.failure_reasons.iter().map(|(k, v)| (k.clone(), *v)).collect();
-        top_failure_reasons.sort_by_key(|entry| std::cmp::Reverse(entry.1));
+        top_failure_reasons.sort_by_key(|reason| Reverse(reason.1));
         top_failure_reasons.truncate(3);
 
         let tps_values: Vec<f64> = throughput_samples.iter().map(|s| s.tps).collect();
@@ -64,6 +64,9 @@ impl<'a> MetricsAggregator<'a> {
             top_failure_reasons,
             receipt_coverage,
             fresh_recipient_count,
+            // Populated by the runner after summarize (it owns the tx-type config); defaults to
+            // None here so non-runner summarize callers stay unaffected.
+            calldata_bytes_per_tx: None,
         }
     }
 
@@ -274,6 +277,13 @@ pub struct MetricsSummary {
     /// Number of fresh recipient keys generated during the run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fresh_recipient_count: Option<u64>,
+    /// Weighted-average calldata bytes per transaction across the configured tx mix.
+    ///
+    /// A data-availability (DA) proxy: on Base, calldata is the dominant DA cost, so this is the
+    /// per-tx input the sequencer must post. Reported alongside gas/TPS so a run can be swept over
+    /// knobs like `channels_per_claim` to see the DA vs. throughput trade-off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub calldata_bytes_per_tx: Option<u64>,
 }
 
 impl MetricsSummary {

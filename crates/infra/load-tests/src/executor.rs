@@ -249,6 +249,12 @@ impl LoadTestExecutor {
             println!("B-20 tokens ready.");
         }
 
+        if runner.needs_batch_settlement_setup() {
+            println!("Setting up x402 batch-settlement channels...");
+            runner.setup_batch_settlement(funding_key.clone()).await?;
+            println!("Batch-settlement channels ready.");
+        }
+
         Ok(())
     }
 
@@ -271,6 +277,12 @@ impl LoadTestExecutor {
                     summary.b20_teardown_error = Some(error.to_string());
                 }
             }
+        }
+
+        if runner.needs_batch_settlement_setup()
+            && let Err(error) = runner.teardown_batch_settlement()
+        {
+            eprintln!("Warning: batch-settlement teardown failed: {error}");
         }
 
         println!();

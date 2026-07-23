@@ -2,8 +2,8 @@
 
 mod config;
 pub use config::{
-    DEFAULT_MAX_GAS_PRICE, LoadConfig, RealTokenAcquisition, RealTokenPairTokenSetup,
-    RealTokenRecoverySummary, RealTokenSetup, TxConfig, TxType,
+    BatchSettlementParams, DEFAULT_MAX_GAS_PRICE, LoadConfig, RealTokenAcquisition,
+    RealTokenPairTokenSetup, RealTokenRecoverySummary, RealTokenSetup, TxConfig, TxType,
 };
 
 mod rate_limiter;
@@ -38,5 +38,7 @@ mod load_runner;
 pub use load_runner::LoadRunner;
 
 mod b20;
+
+mod batch_settlement;
 
 mod real_tokens;

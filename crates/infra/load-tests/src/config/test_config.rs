@@ -12,7 +12,7 @@ use super::{
 };
 use crate::{
     metrics::ConfigSummary,
-    runner::{RealTokenSetup, TxConfig, TxType},
+    runner::{BatchSettlementParams, RealTokenSetup, TxConfig, TxType},
     utils::{BaselineError, Result},
 };
 
@@ -132,6 +132,67 @@ pub struct TestConfig {
     /// re-funded via deposit rather than reclaimed.
     #[serde(default)]
     pub skip_drain: bool,
+
+    /// Optional x402 batch-settlement setup, required when any `batch_settlement_*` transaction
+    /// type is configured.
+    #[serde(default)]
+    pub batch_settlement: Option<BatchSettlementConfig>,
+}
+
+/// YAML configuration for the x402 batch-settlement workload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchSettlementConfig {
+    /// The `x402BatchSettlement` contract address.
+    pub settlement_contract: String,
+    /// The ERC-3009 fixture token (`FiatTokenV2_2`) address.
+    pub token: String,
+    /// The `ERC3009DepositCollector` address.
+    pub collector: String,
+    /// Channels opened per sender during setup (must be a multiple of `channels_per_claim`).
+    #[serde(default = "default_channels_per_sender")]
+    pub channels_per_sender: usize,
+    /// Channels batched into a single claim transaction.
+    #[serde(default = "default_channels_per_claim")]
+    pub channels_per_claim: usize,
+    /// Fraction of load-phase deposits that open a fresh channel rather than topping up a warm one.
+    #[serde(default)]
+    pub fresh_channel_ratio: f64,
+    /// Initial deposit amount / voucher ceiling in token base units (as string).
+    #[serde(default = "default_batch_deposit_amount")]
+    pub deposit_amount: String,
+    /// Number of monotone rungs in each group's pre-signed claim ladder.
+    #[serde(default = "default_claim_ladder_rungs")]
+    pub claim_ladder_rungs: usize,
+    /// Pre-signed top-up deposit authorizations per channel.
+    #[serde(default = "default_topups_per_channel")]
+    pub topups_per_channel: usize,
+    /// Channel `withdrawDelay` in seconds.
+    #[serde(default = "default_withdraw_delay_secs")]
+    pub withdraw_delay_secs: u64,
+}
+
+const fn default_channels_per_sender() -> usize {
+    16
+}
+
+const fn default_channels_per_claim() -> usize {
+    8
+}
+
+const fn default_claim_ladder_rungs() -> usize {
+    128
+}
+
+const fn default_topups_per_channel() -> usize {
+    8
+}
+
+const fn default_withdraw_delay_secs() -> u64 {
+    3600
+}
+
+fn default_batch_deposit_amount() -> String {
+    "1000000000".to_string() // 1000 USDC (1000e6)
 }
 
 impl Default for TestConfig {
@@ -164,6 +225,7 @@ impl Default for TestConfig {
             b20_mint_amount: default_b20_mint_amount(),
             real_token_setup: None,
             skip_drain: false,
+            batch_settlement: None,
         }
     }
 }
@@ -194,6 +256,7 @@ impl fmt::Debug for TestConfig {
             .field("b20_mint_amount", &self.b20_mint_amount)
             .field("real_token_setup", &self.real_token_setup)
             .field("skip_drain", &self.skip_drain)
+            .field("batch_settlement", &self.batch_settlement)
             .finish()
     }
 }
@@ -303,6 +366,17 @@ pub enum TxTypeConfig {
         /// Pre-deployed EVM token contract address.
         contract: String,
     },
+
+    /// x402 batch-settlement `claimWithSignature`. Requires a top-level `batch_settlement` block.
+    BatchSettlementClaimWithSignature,
+    /// x402 batch-settlement `claim`. Requires a top-level `batch_settlement` block.
+    BatchSettlementClaim,
+    /// x402 batch-settlement ERC-3009 `deposit`. Requires a top-level `batch_settlement` block.
+    BatchSettlementDeposit,
+    /// x402 batch-settlement `settle`. Requires a top-level `batch_settlement` block.
+    BatchSettlementSettle,
+    /// x402 batch-settlement `refund`. Requires a top-level `batch_settlement` block.
+    BatchSettlementRefund,
 
     /// Aerodrome Slipstream (concentrated liquidity) swap.
     AerodromeCl {
@@ -540,6 +614,109 @@ impl TestConfig {
         parse_real_token_setup(self.real_token_setup.as_ref(), &self.transactions, chain_id)
     }
 
+    /// Returns `true` if any configured transaction type is a batch-settlement type.
+    fn has_batch_settlement_tx(&self) -> bool {
+        self.transactions.iter().any(|t| {
+            matches!(
+                t.tx_type,
+                TxTypeConfig::BatchSettlementClaimWithSignature
+                    | TxTypeConfig::BatchSettlementClaim
+                    | TxTypeConfig::BatchSettlementDeposit
+                    | TxTypeConfig::BatchSettlementSettle
+                    | TxTypeConfig::BatchSettlementRefund
+            )
+        })
+    }
+
+    /// Parses the optional batch-settlement setup config into runtime parameters.
+    ///
+    /// Requires a `batch_settlement` block whenever a batch-settlement transaction type is used,
+    /// and validates that `channels_per_sender` is a positive multiple of `channels_per_claim`.
+    pub fn parse_batch_settlement(&self) -> Result<Option<BatchSettlementParams>> {
+        let Some(cfg) = self.batch_settlement.as_ref() else {
+            if self.has_batch_settlement_tx() {
+                return Err(BaselineError::Config(
+                    "batch_settlement block is required when a batch_settlement_* transaction type is configured".into(),
+                ));
+            }
+            return Ok(None);
+        };
+
+        let settlement =
+            parse_address(&cfg.settlement_contract, "batch_settlement settlement_contract")?;
+        let token = parse_address(&cfg.token, "batch_settlement token")?;
+        let collector = parse_address(&cfg.collector, "batch_settlement collector")?;
+        if settlement.is_zero() || token.is_zero() || collector.is_zero() {
+            return Err(BaselineError::Config(
+                "batch_settlement contract addresses must be non-zero".into(),
+            ));
+        }
+
+        if cfg.channels_per_claim == 0 {
+            return Err(BaselineError::Config(
+                "batch_settlement channels_per_claim must be > 0".into(),
+            ));
+        }
+        if cfg.channels_per_sender < cfg.channels_per_claim {
+            return Err(BaselineError::Config(
+                "batch_settlement channels_per_sender must be >= channels_per_claim".into(),
+            ));
+        }
+        if cfg.channels_per_sender % cfg.channels_per_claim != 0 {
+            return Err(BaselineError::Config(
+                "batch_settlement channels_per_sender must be a multiple of channels_per_claim"
+                    .into(),
+            ));
+        }
+        if !(0.0..=1.0).contains(&cfg.fresh_channel_ratio) {
+            return Err(BaselineError::Config(
+                "batch_settlement fresh_channel_ratio must be between 0.0 and 1.0".into(),
+            ));
+        }
+        if cfg.claim_ladder_rungs == 0 {
+            return Err(BaselineError::Config(
+                "batch_settlement claim_ladder_rungs must be > 0".into(),
+            ));
+        }
+        if !(900..=2_592_000).contains(&cfg.withdraw_delay_secs) {
+            return Err(BaselineError::Config(
+                "batch_settlement withdraw_delay_secs must be between 900 and 2592000".into(),
+            ));
+        }
+
+        let deposit_amount: u128 = cfg.deposit_amount.parse().map_err(|e| {
+            BaselineError::Config(format!(
+                "invalid batch_settlement deposit_amount '{}': {e}",
+                cfg.deposit_amount
+            ))
+        })?;
+        if deposit_amount == 0 {
+            return Err(BaselineError::Config(
+                "batch_settlement deposit_amount must be > 0".into(),
+            ));
+        }
+        if deposit_amount <= cfg.claim_ladder_rungs as u128 {
+            return Err(BaselineError::Config(
+                "batch_settlement deposit_amount must exceed claim_ladder_rungs so every \
+                 configured rung is strictly increasing"
+                    .into(),
+            ));
+        }
+
+        Ok(Some(BatchSettlementParams {
+            settlement,
+            token,
+            collector,
+            channels_per_sender: cfg.channels_per_sender,
+            channels_per_claim: cfg.channels_per_claim,
+            fresh_channel_ratio: cfg.fresh_channel_ratio,
+            deposit_amount,
+            claim_ladder_rungs: cfg.claim_ladder_rungs,
+            topups_per_channel: cfg.topups_per_channel,
+            withdraw_delay_secs: cfg.withdraw_delay_secs,
+        }))
+    }
+
     /// Returns a summary of the config for JSON output (excludes URLs and secrets).
     pub fn to_summary(&self) -> ConfigSummary {
         ConfigSummary {
@@ -580,6 +757,16 @@ impl TestConfig {
                         })
                         .ok()
                 }),
+            batch_settlement: self.batch_settlement.as_ref().and_then(|config| {
+                serde_json::to_value(config)
+                    .inspect_err(|e| {
+                        tracing::warn!(
+                            error = %e,
+                            "failed to serialize batch-settlement config for config summary"
+                        );
+                    })
+                    .ok()
+            }),
         }
     }
 
@@ -638,6 +825,7 @@ impl TestConfig {
             fresh_recipient_ratio: self.fresh_recipient_ratio,
             open_loop: self.open_loop,
             prefill_per_sender: self.prefill_per_sender,
+            batch_settlement: self.parse_batch_settlement()?,
         })
     }
 
@@ -692,6 +880,13 @@ impl TestConfig {
                 let address = parse_address(contract, "b20_evm contract")?;
                 TxType::B20Evm { contract: address }
             }
+            TxTypeConfig::BatchSettlementClaimWithSignature => {
+                TxType::BatchSettlementClaimWithSignature
+            }
+            TxTypeConfig::BatchSettlementClaim => TxType::BatchSettlementClaim,
+            TxTypeConfig::BatchSettlementDeposit => TxType::BatchSettlementDeposit,
+            TxTypeConfig::BatchSettlementSettle => TxType::BatchSettlementSettle,
+            TxTypeConfig::BatchSettlementRefund => TxType::BatchSettlementRefund,
             TxTypeConfig::Osaka { target } => TxType::Osaka { target: target.clone() },
             TxTypeConfig::UniswapV3 {
                 router,
@@ -836,6 +1031,47 @@ flashblocks_ws: ws://localhost:7111
         assert_eq!(config.sender_count, 100);
         assert!(config.mnemonic.is_none());
         assert!(config.txpool_nodes.is_empty());
+    }
+
+    #[test]
+    fn parse_batch_settlement_config() {
+        let yaml = r#"
+transaction_submission_rpcs: http://localhost:8545
+flashblocks_ws: ws://localhost:7111
+sender_count: 10
+funding_amount: "500000000000000000"
+batch_settlement:
+  settlement_contract: "0x00000000000000000000000000000000000000a1"
+  token: "0x00000000000000000000000000000000000000a2"
+  collector: "0x00000000000000000000000000000000000000a3"
+  channels_per_sender: 16
+  channels_per_claim: 8
+  fresh_channel_ratio: 0.25
+  deposit_amount: "1000000000"
+  claim_ladder_rungs: 32
+  topups_per_channel: 8
+  withdraw_delay_secs: 3600
+transactions:
+  - weight: 90
+    type: batch_settlement_claim_with_signature
+  - weight: 5
+    type: batch_settlement_deposit
+  - weight: 4
+    type: batch_settlement_settle
+  - weight: 1
+    type: batch_settlement_refund
+  - weight: 0
+    type: batch_settlement_claim
+"#;
+        let config = TestConfig::from_yaml(yaml).unwrap();
+        let load_config = config.to_load_config(Some(1337)).unwrap();
+        let params = load_config.batch_settlement.expect("batch_settlement params parsed");
+        assert_eq!(params.channels_per_sender, 16);
+        assert_eq!(params.channels_per_claim, 8);
+        assert_eq!(params.deposit_amount, 1_000_000_000);
+        assert!((params.fresh_channel_ratio - 0.25).abs() < f64::EPSILON);
+        assert_eq!(load_config.transactions.len(), 5);
+        assert!(load_config.transactions.iter().any(|t| t.tx_type.is_batch_settlement()));
     }
 
     #[test]

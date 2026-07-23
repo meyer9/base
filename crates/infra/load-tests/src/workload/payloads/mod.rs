@@ -36,6 +36,17 @@ pub(crate) use b20::{b20_salt_for, b20_token_for};
 mod b20_evm;
 pub use b20_evm::B20EvmTransferPayload;
 
+mod batch_settlement;
+pub use batch_settlement::{
+    BatchSettlementClaimPayload, BatchSettlementClaimWithSignaturePayload,
+    BatchSettlementDepositPayload, BatchSettlementRefundPayload, BatchSettlementSettlePayload,
+    ChannelBook, ChannelConfig, ChannelGroup, DEPOSIT_OPEN_GAS_LIMIT, DEPOSIT_TOPUP_GAS_LIMIT,
+    DepositAuth, FreshChannel, REFUND_GAS_LIMIT, Rung, SETTLE_GAS_LIMIT, SETTLEMENT_DOMAIN_NAME,
+    SETTLEMENT_DOMAIN_VERSION, SenderChannels, SettlementDomain, TOKEN_DOMAIN_NAME,
+    TOKEN_DOMAIN_VERSION, TokenDomain, claim_gas_limit, derive_channel_salt, derive_receiver,
+    encode_collector_data, encode_deposit_call, erc3009_nonce, make_channel_config, sign_digest,
+};
+
 mod osaka;
 pub use osaka::OsakaPayload;
 

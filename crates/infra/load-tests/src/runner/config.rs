@@ -58,11 +58,23 @@ pub enum TxType {
     /// B-20 precompile token transfer. Each sender creates and transfers its own token, created
     /// per run during setup.
     B20,
+
     /// B-20 EVM contract token transfer against a fixed pre-deployed contract.
     B20Evm {
         /// EVM contract address (pre-deployed at DB level).
         contract: Address,
     },
+
+    /// x402 batch-settlement `claimWithSignature` (relay-friendly, receiver-authorizer signature).
+    BatchSettlementClaimWithSignature,
+    /// x402 batch-settlement `claim` (direct, `msg.sender` is the receiver side).
+    BatchSettlementClaim,
+    /// x402 batch-settlement ERC-3009 `deposit` (opens fresh channels or tops up warm ones).
+    BatchSettlementDeposit,
+    /// x402 batch-settlement `settle` (sweeps claimed-but-unsettled balance to a receiver).
+    BatchSettlementSettle,
+    /// x402 batch-settlement `refund` (returns a small amount of unclaimed escrow to the payer).
+    BatchSettlementRefund,
     /// Osaka (Base Azul) opcode or precompile transaction.
     Osaka {
         /// Target Osaka feature.
@@ -106,6 +118,50 @@ pub enum TxType {
         /// Maximum amount when swapping `token_out` to `token_in`.
         reverse_max_amount: U256,
     },
+}
+
+impl TxType {
+    /// Returns `true` for any x402 batch-settlement transaction type.
+    #[must_use]
+    pub const fn is_batch_settlement(&self) -> bool {
+        matches!(
+            self,
+            Self::BatchSettlementClaimWithSignature
+                | Self::BatchSettlementClaim
+                | Self::BatchSettlementDeposit
+                | Self::BatchSettlementSettle
+                | Self::BatchSettlementRefund
+        )
+    }
+}
+
+/// Runtime parameters for the x402 batch-settlement setup and workload.
+///
+/// Shared by every batch-settlement transaction type; setup uses it to open channels and pre-sign
+/// artifacts, and the payloads read the derived [`crate::workload::ChannelBook`].
+#[derive(Debug, Clone)]
+pub struct BatchSettlementParams {
+    /// The `x402BatchSettlement` contract address.
+    pub settlement: Address,
+    /// The ERC-3009 fixture token (`FiatTokenV2_2`) address.
+    pub token: Address,
+    /// The `ERC3009DepositCollector` address.
+    pub collector: Address,
+    /// Number of channels opened per sender during setup (must be a multiple of
+    /// [`Self::channels_per_claim`]).
+    pub channels_per_sender: usize,
+    /// Number of channels batched into a single `claim` / `claimWithSignature` transaction.
+    pub channels_per_claim: usize,
+    /// Fraction of channels left unopened at setup and opened lazily by `deposit` during load.
+    pub fresh_channel_ratio: f64,
+    /// Initial deposit amount (also the per-channel voucher ceiling), in token base units.
+    pub deposit_amount: u128,
+    /// Number of monotone rungs in each group's pre-signed claim ladder.
+    pub claim_ladder_rungs: usize,
+    /// Number of pre-signed top-up deposit authorizations minted per channel.
+    pub topups_per_channel: usize,
+    /// Channel `withdrawDelay` in seconds (must be within the contract's allowed range).
+    pub withdraw_delay_secs: u64,
 }
 
 /// Real-token setup executed before measured swap workloads.
@@ -237,6 +293,7 @@ pub struct LoadConfig {
     /// Fraction of transactions that draw a fresh recipient address instead of cycling through
     /// the sender pool. Used to drive account-trie fan-out for account-create workloads.
     pub fresh_recipient_ratio: f64,
+
     /// Enables open-loop submission mode with pre-signed transactions.
     pub open_loop: bool,
     /// Number of pre-signed transactions to generate per sender in open-loop mode.
@@ -245,6 +302,10 @@ pub struct LoadConfig {
     /// funder account. Kept below the target txpool's per-sender slot limit to avoid "txpool is
     /// full" rejections.
     pub funding_batch_size: usize,
+
+    /// Optional x402 batch-settlement setup parameters, required when any batch-settlement
+    /// transaction type is configured.
+    pub batch_settlement: Option<BatchSettlementParams>,
 }
 
 impl LoadConfig {
@@ -273,6 +334,7 @@ impl LoadConfig {
             open_loop: false,
             prefill_per_sender: 0,
             funding_batch_size: 16,
+            batch_settlement: None,
         }
     }
 

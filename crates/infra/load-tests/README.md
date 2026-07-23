@@ -83,6 +83,7 @@ delay is measured for logging but is no longer included in the JSON output.
 |--------|--------|-------|
 | `devnet.yaml` | Local devnet | Uses Anvil Account #1 |
 | `real-token-devnet.yaml.template` | Local devnet | Rendered by `just load-test real-token` after deploying the devnet WETH/USDC harness |
+| `batch-settlement-devnet.yaml.template` | Local devnet | Rendered by `just load-test batch-settlement` after deploying the `FiatTokenV2_2` + `x402BatchSettlement` + `ERC3009DepositCollector` harness |
 | `sepolia.yaml` | Base Sepolia | Requires `FUNDER_KEY` |
 | `real-token-sepolia.yaml` | Base Sepolia | Uses predeployed WETH/USDC and the Uniswap V3 swap router; run with `just load-test real-token sepolia`; recover with `just load-test real-token-recover sepolia` |
 | `real-token-mainnet-snapshot.yaml` | Local/shadow Base mainnet snapshot | Wraps funded ETH into WETH, acquires USDC, then runs random-direction Uniswap V3 and Aerodrome CL swaps; run with `just load-test real-token mainnet-snapshot` |
@@ -189,6 +190,81 @@ transactions:
   - weight: 100
     type: b20
 ```
+
+#### x402 Batch-Settlement Testing
+
+Benchmarks the on-chain surface of the x402 `batch-settlement` scheme (a stateless unidirectional
+payment-channel contract) as five weighted transaction types: `batch_settlement_claim_with_signature`,
+`batch_settlement_claim` (no batch signature — an A/B variant, default weight 0),
+`batch_settlement_deposit` (ERC-3009), `batch_settlement_settle`, and `batch_settlement_refund`.
+
+Scope is **on-chain only**: the workload reproduces the facilitator's would-be on-chain payloads but
+does **not** run a facilitator or its `/verify` step (that is a separate microbenchmark track).
+
+Role model: each funded sender owns all signing roles of its own channels
+(`payer = payerAuthorizer = receiverAuthorizer`) and is also the relayer, so all five tx types submit
+with `from = sender` and parallelize across the sender pool. Per-voucher ECDSA signing is far too slow
+for the single-threaded generator, so every voucher signature, claim-batch signature, and ERC-3009
+deposit authorization is **pre-signed during setup** and stored in a shared channel book; the hot path
+only pops a pre-signed artifact and ABI-encodes calldata. Channels are organized into fixed groups of
+`channels_per_claim` that advance a shared monotone `totalClaimed` ladder in lockstep, so each rung's
+batch signature can be pre-signed per `(group, rung)`.
+
+Setup (per sender, in parallel): pre-sign artifacts, mint fixture USDC via the funder (a configured
+minter), then open the setup channels with real ERC-3009 deposits. A `fresh_channel_ratio` fraction of
+channels is pre-provisioned but left unopened so the load-phase `deposit` sub-action opens them
+(driving new-slot state-root cost). The fixture token is a self-contained `FiatTokenV2_2` port so the
+deposit path's real ERC-3009 signature verification and blacklist/pause `SLOAD`s match mainnet USDC.
+
+```bash
+# Deploy the devnet harness (FiatTokenV2_2 + x402BatchSettlement + ERC3009DepositCollector) and run
+just load-test batch-settlement
+```
+
+```yaml
+batch_settlement:
+  settlement_contract: "0x..." # x402BatchSettlement
+  token: "0x..."              # FiatTokenV2_2 (ERC-3009)
+  collector: "0x..."          # ERC3009DepositCollector
+  channels_per_sender: 16     # rounded down to a multiple of channels_per_claim
+  channels_per_claim: 8       # batch size per claim (the primary DA / sig-verification knob)
+  fresh_channel_ratio: 0.25   # fraction opened lazily during load (new-slot state-root cost)
+  deposit_amount: "1000000000" # 1000 USDC; also the per-channel voucher ceiling
+  # Must cover the projected claim count for the configured GPS and duration.
+  claim_ladder_rungs: 128
+  topups_per_channel: 8
+  withdraw_delay_secs: 3600
+transactions:
+  - { weight: 90, type: batch_settlement_claim_with_signature }
+  - { weight: 5,  type: batch_settlement_deposit }
+  - { weight: 4,  type: batch_settlement_settle }
+  - { weight: 1,  type: batch_settlement_refund }
+  - { weight: 0,  type: batch_settlement_claim }
+```
+
+##### Interpreting the numbers: "1M TPS with batch settlement" vs. on-chain ceiling
+
+This workload measures the **on-chain ceiling** only, and reports `calldata_bytes_per_tx` in the run
+summary alongside gas/TPS/GPS as a data-availability (DA) proxy (calldata dominates DA cost on Base).
+Sweep `channels_per_claim` (sig-verification + calldata load per claim) and `fresh_channel_ratio`
+(state-root new-slot cost) to trace the trade-off.
+
+On-chain claim throughput is **not** request throughput: claims are cumulative and batched, so one
+`claimWithSignature` tx settles `channels_per_claim` channels and can represent many off-chain
+payments. The honest end-to-end headline is a `min()` of independent stages, only the last of which
+this harness measures:
+
+```text
+sustainable_requests_per_sec = min(
+    verify_capacity,                                   # facilitator /verify (separate track)
+    deposit_throughput × payments_per_channel_lifetime, # channel opens amortized over reuse
+    claim_throughput × channels_per_claim × claim_amortization  # THIS harness (on-chain ceiling)
+)
+```
+
+The `/verify` layer is the likely binding constraint for steady state and is benchmarked separately;
+this deliverable produces the on-chain `claim_throughput × channels_per_claim` term. Reporting a raw
+on-chain TPS as the fullstack number would overstate capacity.
 
 #### Swap Testing
 

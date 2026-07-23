@@ -305,7 +305,10 @@ impl SubmissionPipeline {
         let prepared_queue = Arc::new(PipelineQueue::new(prepared_batch_rx));
         let signed_queue = Arc::new(PipelineQueue::new(signed_batch_rx));
         let shutdown = CancellationToken::new();
-        let signer_worker_count = Self::signer_worker_count(submission_batch_rpcs.len());
+        // Nonce assignment must follow generation order. Multiple signer workers can dequeue later
+        // batches first, assigning dependent transactions in reverse order. Transaction signing is
+        // CPU-local and batched; RPC submission remains parallel through the sender workers.
+        let signer_worker_count = 1;
         let sender_worker_count =
             Self::sender_worker_count_for_mode(submission_batch_rpcs.len(), config.open_loop);
 
