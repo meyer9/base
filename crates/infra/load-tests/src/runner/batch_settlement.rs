@@ -5,6 +5,9 @@
 //!
 //! # Phases
 //!
+//! 0. **Contract deployment** (once per devnet): if `FiatTokenV2_2`, `x402BatchSettlement`, or
+//!    `ERC3009DepositCollector` are not yet deployed at their deterministic CREATE2 addresses, the
+//!    funder deploys them now via the Foundry CREATE2 factory.
 //! 1. **Pre-sign artifacts** (CPU, per sender): build the [`ChannelBook`] — channel configs,
 //!    constant payer voucher signatures, the monotone claim-batch ladder, top-up authorizations,
 //!    and pre-provisioned fresh channels.
@@ -59,6 +62,35 @@ const VALID_AFTER: u64 = 0;
 /// `validBefore` used for every ERC-3009 deposit authorization (effectively never expires).
 const VALID_BEFORE: u64 = u64::MAX;
 
+const CREATE2_FACTORY: &str = "0x4e59b44847b379578588920cA78FbF26c0B4956C";
+const DEPLOY_GAS_LIMIT: u64 = 5_000_000;
+
+// Each salt is the big-endian uint256 from `DeployBatchSettlementDevnet.s.sol`, encoded as 32 bytes.
+// TOKEN_SALT = bytes32(uint256(0x78343032546f6b656e53616c74000000000000000000000000000000000000))
+const TOKEN_SALT: [u8; 32] = [
+    0x00, 0x78, 0x34, 0x30, 0x32, 0x54, 0x6f, 0x6b, 0x65, 0x6e, 0x53, 0x61, 0x6c, 0x74, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00,
+];
+// SETTLEMENT_SALT = bytes32(uint256(0x783430324261746368536574746c656d656e7453616c74000000000000000000))
+const SETTLEMENT_SALT: [u8; 32] = [
+    0x78, 0x34, 0x30, 0x32, 0x42, 0x61, 0x74, 0x63, 0x68, 0x53, 0x65, 0x74, 0x74, 0x6c, 0x65,
+    0x6d, 0x65, 0x6e, 0x74, 0x53, 0x61, 0x6c, 0x74, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00,
+];
+// COLLECTOR_SALT = bytes32(uint256(0x7834303244657036436f6c6c6563746f7253616c740000000000000000000000))
+const COLLECTOR_SALT: [u8; 32] = [
+    0x78, 0x34, 0x30, 0x32, 0x44, 0x65, 0x70, 0x36, 0x43, 0x6f, 0x6c, 0x6c, 0x65, 0x63, 0x74,
+    0x6f, 0x72, 0x53, 0x61, 0x6c, 0x74, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00,
+];
+
+// Compiled creation bytecodes. Token constructor takes `address minter`; collector constructor
+// takes `address _x402BatchSettlement`. Both are ABI-appended by the deploy helper.
+const FIAT_TOKEN_BYTECODE: &str = include_str!("artifacts/fiat_token_v2_2.hex");
+const BATCH_SETTLEMENT_BYTECODE: &str = include_str!("artifacts/x402_batch_settlement.hex");
+const DEPOSIT_COLLECTOR_BYTECODE: &str = include_str!("artifacts/erc3009_deposit_collector.hex");
+
 sol! {
     function mint(address to, uint256 amount) external returns (bool);
 }
@@ -74,6 +106,174 @@ impl LoadRunner {
         self.config.transactions.iter().any(|t| t.tx_type.is_batch_settlement())
     }
 
+    /// Deploys `FiatTokenV2_2`, `x402BatchSettlement`, and `ERC3009DepositCollector` via the
+    /// Foundry CREATE2 factory if they are not already present at their deterministic addresses.
+    ///
+    /// Safe to call on every run: `eth_getCode` is checked first, and contracts that are already
+    /// deployed are skipped. The funder becomes the token's minter.
+    async fn deploy_contracts_if_needed(
+        provider: &WalletProvider,
+        funder: Address,
+        params: &BatchSettlementParams,
+        chain_id: u64,
+        max_fee: u128,
+        max_priority_fee: u128,
+    ) -> Result<()> {
+        let factory: Address = CREATE2_FACTORY
+            .parse()
+            .map_err(|e| BaselineError::Config(format!("invalid CREATE2 factory address: {e}")))?;
+
+        let token_code = provider.get_code_at(params.token).await.rpc("get_code token")?;
+        let settlement_code =
+            provider.get_code_at(params.settlement).await.rpc("get_code settlement")?;
+        let collector_code =
+            provider.get_code_at(params.collector).await.rpc("get_code collector")?;
+
+        let need_token = token_code.is_empty();
+        let need_settlement = settlement_code.is_empty();
+        let need_collector = collector_code.is_empty();
+
+        if !need_token && !need_settlement && !need_collector {
+            info!("x402 contracts already deployed — skipping deployment");
+            return Ok(());
+        }
+
+        info!(
+            token = need_token,
+            settlement = need_settlement,
+            collector = need_collector,
+            "deploying missing x402 devnet contracts via CREATE2 factory"
+        );
+
+        let mut nonce =
+            provider.get_transaction_count(funder).pending().await.rpc("funder nonce for deploy")?;
+
+        let mut deploy = |salt: [u8; 32], mut init_code: Vec<u8>| {
+            let input: Bytes = {
+                let mut payload = Vec::with_capacity(32 + init_code.len());
+                payload.extend_from_slice(&salt);
+                payload.append(&mut init_code);
+                payload.into()
+            };
+            let tx = TransactionRequest::default()
+                .with_to(factory)
+                .with_input(input)
+                .with_nonce(nonce)
+                .with_chain_id(chain_id)
+                .with_gas_limit(DEPLOY_GAS_LIMIT)
+                .with_max_fee_per_gas(max_fee)
+                .with_max_priority_fee_per_gas(max_priority_fee);
+            nonce += 1;
+            tx
+        };
+
+        let token_bc = hex::decode(FIAT_TOKEN_BYTECODE.trim()).map_err(|e| {
+            BaselineError::Config(format!("invalid FiatTokenV2_2 bytecode hex: {e}"))
+        })?;
+        let settlement_bc = hex::decode(BATCH_SETTLEMENT_BYTECODE.trim()).map_err(|e| {
+            BaselineError::Config(format!("invalid x402BatchSettlement bytecode hex: {e}"))
+        })?;
+        let collector_bc = hex::decode(DEPOSIT_COLLECTOR_BYTECODE.trim()).map_err(|e| {
+            BaselineError::Config(format!("invalid ERC3009DepositCollector bytecode hex: {e}"))
+        })?;
+
+        let mut pending_deploys: Vec<PendingTransactionBuilder<Ethereum>> = Vec::new();
+
+        if need_token {
+            let mut init_code = token_bc;
+            init_code.extend_from_slice(&funder.into_word().0);
+            let tx = deploy(TOKEN_SALT, init_code);
+            let p = provider
+                .send_transaction(tx)
+                .await
+                .map_err(|e| BaselineError::Transaction(format!("token deploy send failed: {e}")))?;
+            pending_deploys.push(p);
+        }
+
+        if need_settlement {
+            let tx = deploy(SETTLEMENT_SALT, settlement_bc);
+            let p = provider.send_transaction(tx).await.map_err(|e| {
+                BaselineError::Transaction(format!("settlement deploy send failed: {e}"))
+            })?;
+            pending_deploys.push(p);
+        }
+
+        if need_collector {
+            let mut init_code = collector_bc;
+            init_code.extend_from_slice(&params.settlement.into_word().0);
+            let tx = deploy(COLLECTOR_SALT, init_code);
+            let p = provider.send_transaction(tx).await.map_err(|e| {
+                BaselineError::Transaction(format!("collector deploy send failed: {e}"))
+            })?;
+            pending_deploys.push(p);
+        }
+
+        for pending in pending_deploys {
+            let receipt = pending
+                .with_timeout(Some(RECEIPT_TIMEOUT))
+                .get_receipt()
+                .await
+                .map_err(|e| BaselineError::Transaction(format!("deploy receipt failed: {e}")))?;
+            if !receipt.status() {
+                return Err(BaselineError::Transaction(format!(
+                    "contract deployment reverted (tx {})",
+                    receipt.transaction_hash
+                )));
+            }
+        }
+
+        if need_token {
+            Self::configure_token_minter(provider, params.token, funder, chain_id, max_fee, max_priority_fee, nonce).await?;
+        }
+
+        info!("x402 devnet contracts deployed");
+        Ok(())
+    }
+
+    /// Calls `configureMinter(funder, type(uint256).max)` on the fixture token so the funder can
+    /// mint USDC to senders during setup.
+    async fn configure_token_minter(
+        provider: &WalletProvider,
+        token: Address,
+        funder: Address,
+        chain_id: u64,
+        max_fee: u128,
+        max_priority_fee: u128,
+        nonce: u64,
+    ) -> Result<()> {
+        sol! {
+            function configureMinter(address minter, uint256 minterAllowedAmount) external returns (bool);
+        }
+        let input = Bytes::from(
+            configureMinterCall { minter: funder, minterAllowedAmount: U256::MAX }.abi_encode(),
+        );
+        let tx = TransactionRequest::default()
+            .with_to(token)
+            .with_input(input)
+            .with_nonce(nonce)
+            .with_chain_id(chain_id)
+            .with_gas_limit(MINT_GAS_LIMIT)
+            .with_max_fee_per_gas(max_fee)
+            .with_max_priority_fee_per_gas(max_priority_fee);
+        let receipt = provider
+            .send_transaction(tx)
+            .await
+            .map_err(|e| BaselineError::Transaction(format!("configureMinter send failed: {e}")))?
+            .with_timeout(Some(RECEIPT_TIMEOUT))
+            .get_receipt()
+            .await
+            .map_err(|e| {
+                BaselineError::Transaction(format!("configureMinter receipt failed: {e}"))
+            })?;
+        if !receipt.status() {
+            return Err(BaselineError::Transaction(format!(
+                "configureMinter reverted (tx {}); is the funder the masterMinter?",
+                receipt.transaction_hash
+            )));
+        }
+        Ok(())
+    }
+
     /// Opens and pre-signs every sender's x402 batch-settlement channels.
     ///
     /// Pre-signs all artifacts into a [`ChannelBook`], mints fixture USDC to each sender through
@@ -87,6 +287,30 @@ impl LoadRunner {
             )
         })?;
 
+        let chain_id = self.config.chain_id;
+        let base_fee = self.client.get_base_fee().await?;
+        let max_priority_fee = (base_fee / 10).max(1);
+        let max_fee = SubmissionPipeline::submission_max_fee(
+            base_fee,
+            max_priority_fee,
+            self.config.max_gas_price,
+        );
+        let funder = funding_key.address();
+        let wallet = EthereumWallet::from(funding_key.clone());
+        let deploy_provider =
+            create_wallet_provider(self.config.primary_submission_rpc().clone(), wallet);
+
+        println!("Checking x402 contract deployments...");
+        Self::deploy_contracts_if_needed(
+            &deploy_provider,
+            funder,
+            &params,
+            chain_id,
+            max_fee,
+            max_priority_fee,
+        )
+        .await?;
+
         if params.channels_per_claim == 0
             || params.channels_per_sender % params.channels_per_claim != 0
         {
@@ -97,17 +321,6 @@ impl LoadRunner {
         }
         self.validate_batch_settlement_capacity(&params)?;
 
-        let chain_id = self.config.chain_id;
-        let base_fee = self.client.get_base_fee().await?;
-        let max_priority_fee = (base_fee / 10).max(1);
-        let max_fee = SubmissionPipeline::submission_max_fee(
-            base_fee,
-            max_priority_fee,
-            self.config.max_gas_price,
-        );
-
-        // A fresh per-run salt keeps every run's channelIds (and receiver slots) distinct, so a
-        // re-run never collides with a prior run's already-opened channels.
         let run_salt = B256::from(rand::random::<[u8; 32]>());
         let settlement_domain = SettlementDomain::new(chain_id, params.settlement);
         let token_domain = TokenDomain::new(chain_id, params.token);

@@ -78,16 +78,19 @@ contract FiatTokenV2_2 {
     error InsufficientBalance();
     error InsufficientAllowance();
 
-    constructor() {
+    /// @param minter The address that will be set as `masterMinter` and granted the initial minter
+    ///               role. Pass the deployer EOA when using CREATE2 (where `msg.sender` would be
+    ///               the CREATE2 factory rather than the intended admin).
+    constructor(address minter) {
         // Mirrors USDC v2.2 metadata and EIP-712 domain so the token domain separator matches the
         // one the load tester signs against (name "USD Coin", version "2").
         name = "USD Coin";
         symbol = "USDC";
         decimals = 6;
-        owner = msg.sender;
-        masterMinter = msg.sender;
-        pauser = msg.sender;
-        blacklister = msg.sender;
+        owner = minter;
+        masterMinter = minter;
+        pauser = minter;
+        blacklister = minter;
         DOMAIN_SEPARATOR = keccak256(
             abi.encode(
                 keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
