@@ -27,6 +27,7 @@ reth-basic-payload-builder.workspace = true
 reth-payload-builder-primitives.workspace = true
 reth-revm = { workspace = true, features = ["witness"] }
 reth-trie-common.workspace = true
+reth-provider = { workspace = true, optional = true }
 
 # op-reth
 base-common-evm.workspace = true
@@ -52,3 +53,7 @@ serde.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 derive_more.workspace = true
+
+[features]
+default = ["mmr"]
+mmr = ["dep:reth-provider", "reth-provider/mmr"]

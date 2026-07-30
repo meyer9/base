@@ -255,6 +255,9 @@ pub struct BasePayloadBuilderCtx {
     pub builder_config: BuilderConfig,
     /// Sender for forwarding per-block batches of rejected transactions to the audit-archiver.
     pub rejected_tx_sender: Option<mpsc::Sender<Vec<RejectedTransaction>>>,
+    /// Primary DB path (`…/db`) for per-node QMDB peeks when `mmr` is enabled.
+    #[cfg(feature = "mmr")]
+    pub qmdb_db_path: Option<std::path::PathBuf>,
 }
 
 impl BasePayloadBuilderCtx {
@@ -1383,6 +1386,8 @@ impl BasePayloadBuilderCtx {
             extra: FlashblocksExtraCtx::default(),
             builder_config: crate::BuilderConfig::default(),
             rejected_tx_sender: None,
+            #[cfg(feature = "mmr")]
+            qmdb_db_path: None,
         }
     }
 }

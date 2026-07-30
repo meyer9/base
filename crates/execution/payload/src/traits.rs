@@ -20,7 +20,7 @@ pub trait PayloadPrimitives:
     /// Helper AT to bound [`NodePrimitives::Block`] type without causing bound cycle.
     type _TX: SignedTransaction + BaseTransaction;
     /// Helper AT to bound [`NodePrimitives::Block`] type without causing bound cycle.
-    type _Header: FullBlockHeader;
+    type _Header: FullBlockHeader + reth_primitives_traits::header::HeaderMut;
 }
 
 impl<Tx, T, Header> PayloadPrimitives for T
@@ -32,7 +32,7 @@ where
             BlockBody = BlockBody<Tx, Header>,
             BlockHeader = Header,
         >,
-    Header: FullBlockHeader,
+    Header: FullBlockHeader + reth_primitives_traits::header::HeaderMut,
 {
     type _TX = Tx;
     type _Header = Header;

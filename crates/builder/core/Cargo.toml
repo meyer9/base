@@ -181,14 +181,14 @@ criterion = { workspace = true, features = ["html_reports"] }
 ctor.workspace = true
 hyper.workspace = true
 rlimit.workspace = true
-rstest.workspace = true
 nanoid.workspace = true
 tempfile.workspace = true
 hyper-util.workspace = true
 http-body-util.workspace = true
 
 [features]
-default = [ "jemalloc", "metrics" ]
+default = [ "jemalloc", "metrics", "mmr" ]
+mmr = ["reth-provider/mmr"]
 metrics = [
 	"base-common-evm/metrics",
 	"base-metrics/metrics",

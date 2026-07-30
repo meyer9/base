@@ -27,7 +27,8 @@ use reth_payload_builder_primitives::PayloadBuilderError;
 use reth_payload_primitives::{BuildNextEnv, BuiltPayloadExecutedBlock};
 use reth_payload_util::{BestPayloadTransactions, NoopPayloadTransactions, PayloadTransactions};
 use reth_primitives_traits::{
-    HeaderTy, NodePrimitives, SealedHeader, SealedHeaderFor, SignedTransaction, TxTy,
+    HeaderTy, NodePrimitives, RecoveredBlock, SealedHeader, SealedHeaderFor, SignedTransaction,
+    TxTy,
 };
 use reth_revm::{
     cancelled::CancelOnDrop, database::StateProviderDatabase, db::State,
@@ -66,6 +67,9 @@ pub struct BasePayloadBuilder<
     /// The type responsible for yielding the best transactions for the payload if mempool
     /// transactions are allowed.
     pub best_transactions: Txs,
+    /// Primary DB path (`…/db`) for per-node QMDB peeks when `mmr` is enabled.
+    #[cfg(feature = "mmr")]
+    pub qmdb_db_path: Option<std::path::PathBuf>,
     /// Marker for the payload attributes type.
     _pd: PhantomData<Attrs>,
 }
@@ -85,6 +89,8 @@ where
             config: self.config.clone(),
             best_transactions: self.best_transactions.clone(),
             compute_pending_block: self.compute_pending_block,
+            #[cfg(feature = "mmr")]
+            qmdb_db_path: self.qmdb_db_path.clone(),
             _pd: PhantomData,
         }
     }
@@ -112,6 +118,8 @@ impl<Pool, Client, Evm, Attrs> BasePayloadBuilder<Pool, Client, Evm, (), Attrs> 
             evm_config,
             config,
             best_transactions: (),
+            #[cfg(feature = "mmr")]
+            qmdb_db_path: None,
             _pd: PhantomData,
         }
     }
@@ -130,7 +138,16 @@ impl<Pool, Client, Evm, Txs, Attrs> BasePayloadBuilder<Pool, Client, Evm, Txs, A
         self,
         best_transactions: T,
     ) -> BasePayloadBuilder<Pool, Client, Evm, T, Attrs> {
-        let Self { pool, client, compute_pending_block, evm_config, config, .. } = self;
+        let Self {
+            pool,
+            client,
+            compute_pending_block,
+            evm_config,
+            config,
+            #[cfg(feature = "mmr")]
+            qmdb_db_path,
+            ..
+        } = self;
         BasePayloadBuilder {
             pool,
             client,
@@ -138,8 +155,17 @@ impl<Pool, Client, Evm, Txs, Attrs> BasePayloadBuilder<Pool, Client, Evm, Txs, A
             evm_config,
             best_transactions,
             config,
+            #[cfg(feature = "mmr")]
+            qmdb_db_path,
             _pd: PhantomData,
         }
+    }
+
+    /// Sets the primary DB path used for QMDB header-root peeks (multi-node safe).
+    #[cfg(feature = "mmr")]
+    pub fn with_qmdb_db_path(mut self, path: Option<std::path::PathBuf>) -> Self {
+        self.qmdb_db_path = path;
+        self
     }
 
     /// Enables the rollup's compute pending block configuration option.
@@ -195,6 +221,8 @@ where
             config,
             cancel,
             best_payload,
+            #[cfg(feature = "mmr")]
+            qmdb_db_path: self.qmdb_db_path.clone(),
         };
         tracing::Span::current().record("payload_id", tracing::field::display(ctx.payload_id()));
         tracing::Span::current().record("parent_num", ctx.parent().number());
@@ -234,6 +262,8 @@ where
             config,
             cancel: Default::default(),
             best_payload: Default::default(),
+            #[cfg(feature = "mmr")]
+            qmdb_db_path: self.qmdb_db_path.clone(),
         };
 
         let state_provider = self.client.state_by_block_hash(ctx.parent().hash())?;
@@ -382,14 +412,73 @@ impl<Txs> Builder<'_, Txs> {
         }
 
         let block_num = ctx.parent().number().saturating_add(1);
+
+        // Finish first so post-execution system calls are included in `hashed_state`, then
+        // optionally replace the header stateRoot with a QMDB peek of that same diff.
         let BlockBuilderOutcome {
             execution_result,
             hashed_state,
-            trie_updates,
-            block,
+            mut trie_updates,
+            mut block,
             block_access_list,
         } = debug_span!("finish_payload", block_num)
             .in_scope(|| builder.finish(state_provider, None))?;
+
+        #[cfg(feature = "mmr")]
+        {
+            match reth_provider::mmr::peek_state_root_prefer_path_at_block(
+                ctx.qmdb_db_path.as_deref(),
+                Some(block_num),
+                &hashed_state,
+            ) {
+                Ok(Some(root)) => {
+                    eprintln!(
+                        "[mmr] payload peek ok root={root} path={:?}",
+                        ctx.qmdb_db_path
+                    );
+                    debug!(
+                        target: "payload_builder",
+                        id = %ctx.payload_id(),
+                        %root,
+                        "using QMDB peek root as payload stateRoot"
+                    );
+                    if let Some(db_path) = ctx.qmdb_db_path.as_deref() {
+                        // Standalone snapshot sequencing uses no_tx_pool=false (Better
+                        // payloads). Always stage a pending overlay; save_blocks commits.
+                        reth_provider::mmr::push_pending_hashed_state(
+                            db_path,
+                            block_num,
+                            &hashed_state,
+                        );
+                    }
+                    use reth_primitives_traits::{header::HeaderMut, Block as RethBlock};
+                    let (mut blk, senders) = block.split();
+                    let (mut header, body) = RethBlock::split(blk);
+                    header.set_state_root(root);
+                    let blk = RethBlock::new(header, body);
+                    block = RecoveredBlock::new_unhashed(blk, senders);
+                    trie_updates = Default::default();
+                }
+                Ok(None) => {
+                    eprintln!(
+                        "[mmr] payload peek None (keeping MPT root) path={:?}",
+                        ctx.qmdb_db_path
+                    );
+                }
+                Err(err) => {
+                    eprintln!(
+                        "[mmr] payload peek err={err} path={:?} (keeping MPT root)",
+                        ctx.qmdb_db_path
+                    );
+                    warn!(
+                        target: "payload_builder",
+                        id = %ctx.payload_id(),
+                        %err,
+                        "QMDB peek root failed; keeping MPT state root"
+                    );
+                }
+            }
+        }
 
         let sealed_block = Arc::new(block.sealed_block().clone());
         debug!(target: "payload_builder", id=%ctx.payload_id(), sealed_block_header = ?sealed_block.header(), "sealed built block");
@@ -581,6 +670,9 @@ pub struct BasePayloadBuilderCtx<
     pub cancel: CancelOnDrop,
     /// The currently best payload.
     pub best_payload: Option<BaseBuiltPayload<Evm::Primitives>>,
+    /// Primary DB path (`…/db`) for per-node QMDB peeks when `mmr` is enabled.
+    #[cfg(feature = "mmr")]
+    pub qmdb_db_path: Option<std::path::PathBuf>,
 }
 
 impl<Evm, ChainSpec, Attrs> BasePayloadBuilderCtx<Evm, ChainSpec, Attrs>

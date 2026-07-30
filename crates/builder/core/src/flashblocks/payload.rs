@@ -135,6 +135,9 @@ pub(super) struct BasePayloadBuilder<Pool, Client, S = DefaultCandidateSource> {
     last_emitted_flashblock_id: Arc<LastEmittedFlashblockId>,
     /// Transforms the candidate transaction stream drained by the build loop.
     candidate_source: S,
+    /// Primary DB path for QMDB peeks.
+    #[cfg(feature = "mmr")]
+    qmdb_db_path: Option<std::path::PathBuf>,
 }
 
 impl<Pool, Client, S> BasePayloadBuilder<Pool, Client, S> {
@@ -155,7 +158,16 @@ impl<Pool, Client, S> BasePayloadBuilder<Pool, Client, S> {
             outputs,
             last_emitted_flashblock_id: Arc::default(),
             candidate_source,
+            #[cfg(feature = "mmr")]
+            qmdb_db_path: None,
         }
+    }
+
+    /// Sets the primary DB path used for QMDB header-root peeks.
+    #[cfg(feature = "mmr")]
+    pub(super) fn with_qmdb_db_path(mut self, path: Option<std::path::PathBuf>) -> Self {
+        self.qmdb_db_path = path;
+        self
     }
 
     fn previous_flashblock_id(&self) -> FlashblockId {
@@ -255,6 +267,8 @@ where
             extra,
             builder_config: self.config.clone(),
             rejected_tx_sender: self.outputs.rejected_tx_sender.clone(),
+            #[cfg(feature = "mmr")]
+            qmdb_db_path: self.qmdb_db_path.clone(),
         })
     }
 
@@ -285,6 +299,7 @@ where
         span.record("payload_id", config.attributes.payload_attributes.id.to_string());
 
         let timestamp = config.attributes.timestamp();
+        let timestamp_millis_part = config.attributes.timestamp_millis_part;
         let mut ctx = self
             .get_base_payload_builder_ctx(
                 config,
@@ -309,9 +324,15 @@ where
         BuilderMetrics::sequencer_tx_duration().record(sequencer_tx_time);
         BuilderMetrics::sequencer_tx_gauge().set(sequencer_tx_time);
 
-        // We adjust our flashblocks timings based on time_drift if dynamic adjustment enable
-        let (flashblocks_per_block, first_flashblock_offset) =
-            self.calculate_flashblocks(timestamp);
+        // A block cadence at or below the Flashblocks interval has no intermediate updates. Start
+        // its single canonical payload batch immediately instead of waiting for a Flashblocks
+        // timer at the end of the build window.
+        let (flashblocks_per_block, first_flashblock_offset) = if self.config.flashblocks_enabled()
+        {
+            self.calculate_flashblocks(timestamp, timestamp_millis_part)
+        } else {
+            (1, Duration::ZERO)
+        };
 
         let skip_flashblocks_building = ctx.attributes().no_tx_pool || flashblocks_per_block == 0;
 
@@ -340,26 +361,30 @@ where
         // `RingBuffer::entries_after`, but still receive all subsequent
         // flashblocks for the same block.
         if !ctx.attributes().no_tx_pool {
-            let flashblock_byte_size = self
-                .outputs
-                .ws_pub
-                .publish(&fb_payload, ctx.block_number(), 0)
-                .map_err(PayloadBuilderError::other)?;
-            self.record_emitted_flashblock(ctx.block_number(), 0);
-            let invalidated = self.pool.invalidate_from_state_diff(&state_diff);
-            if invalidated > 0 {
-                debug!(
-                    target: "payload_builder",
-                    invalidated,
-                    "transactions invalidated after fallback flashblock publication"
+            if self.config.flashblocks_enabled() {
+                let flashblock_byte_size = self
+                    .outputs
+                    .ws_pub
+                    .publish(&fb_payload, ctx.block_number(), 0)
+                    .map_err(PayloadBuilderError::other)?;
+                self.record_emitted_flashblock(ctx.block_number(), 0);
+                let invalidated = self.pool.invalidate_from_state_diff(&state_diff);
+                if invalidated > 0 {
+                    debug!(
+                        target: "payload_builder",
+                        invalidated,
+                        "transactions invalidated after fallback flashblock publication"
+                    );
+                }
+                BuilderMetrics::flashblock_byte_size_histogram()
+                    .record(flashblock_byte_size as f64);
+                BuilderMetrics::first_flashblock_time_offset()
+                    .record(first_flashblock_offset.as_millis() as f64);
+                BuilderMetrics::reduced_flashblocks_number().record(
+                    self.config.flashblocks_per_block().saturating_sub(flashblocks_per_block)
+                        as f64,
                 );
             }
-            BuilderMetrics::flashblock_byte_size_histogram().record(flashblock_byte_size as f64);
-            BuilderMetrics::first_flashblock_time_offset()
-                .record(first_flashblock_offset.as_millis() as f64);
-            BuilderMetrics::reduced_flashblocks_number()
-                .record(self.config.flashblocks_per_block().saturating_sub(flashblocks_per_block)
-                    as f64);
         } else {
             info!(
                 target: "payload_builder",
@@ -756,12 +781,17 @@ where
                     if block_cancel.is_cancelled() {
                         (true, 0)
                     } else {
-                        let size = self
-                            .outputs
-                            .ws_pub
-                            .publish(&fb_payload, ctx.block_number(), flashblock_index)
-                            .wrap_err("failed to publish flashblock via websocket")?;
-                        self.record_emitted_flashblock(ctx.block_number(), flashblock_index);
+                        let size = if self.config.flashblocks_enabled() {
+                            let size = self
+                                .outputs
+                                .ws_pub
+                                .publish(&fb_payload, ctx.block_number(), flashblock_index)
+                                .wrap_err("failed to publish flashblock via websocket")?;
+                            self.record_emitted_flashblock(ctx.block_number(), flashblock_index);
+                            size
+                        } else {
+                            0
+                        };
                         (false, size)
                     }
                 };
@@ -811,21 +841,23 @@ where
 
                 // Record flashblock build duration
                 let flashblock_build_duration = flashblock_build_start_time.elapsed();
-                self.emit_flashblock_event(
-                    ctx,
-                    &payload_id,
-                    TransactionEventType::BuilderFlashblockPublished,
-                    Some(fb_payload.diff.block_hash),
-                    || {
-                        BuilderFlashblockPublishedEventData::new(
-                            fb_payload.diff.transactions.len(),
-                            flashblock_byte_size,
-                            flashblock_build_duration.as_secs_f64() * 1000.0,
-                            fb_payload.diff.gas_used,
-                            fb_payload.diff.block_hash,
-                        )
-                    },
-                );
+                if self.config.flashblocks_enabled() {
+                    self.emit_flashblock_event(
+                        ctx,
+                        &payload_id,
+                        TransactionEventType::BuilderFlashblockPublished,
+                        Some(fb_payload.diff.block_hash),
+                        || {
+                            BuilderFlashblockPublishedEventData::new(
+                                fb_payload.diff.transactions.len(),
+                                flashblock_byte_size,
+                                flashblock_build_duration.as_secs_f64() * 1000.0,
+                                fb_payload.diff.gas_used,
+                                fb_payload.diff.block_hash,
+                            )
+                        },
+                    );
+                }
                 BuilderMetrics::flashblock_build_duration().record(flashblock_build_duration);
                 BuilderMetrics::flashblock_byte_size_histogram()
                     .record(flashblock_byte_size as f64);
@@ -1034,14 +1066,20 @@ where
     }
 
     /// Calculate number of flashblocks, taking time drift into account.
-    pub(super) fn calculate_flashblocks(&self, timestamp: u64) -> (u64, Duration) {
+    pub(super) fn calculate_flashblocks(
+        &self,
+        timestamp: u64,
+        timestamp_millis_part: Option<u16>,
+    ) -> (u64, Duration) {
         // We use this system time to determine remaining time to build a block
         // Things to consider:
         // FCU(a) - FCU with attributes
         // FCU(a) could arrive with `block_time - fb_time < delay`. In this case we could only produce 1 flashblock
         // FCU(a) could arrive with `delay < fb_time` - in this case we will shrink first flashblock
         // FCU(a) could arrive with `fb_time < delay < block_time - fb_time` - in this case we will issue less flashblocks
-        let target_time = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(timestamp)
+        let target_time = std::time::SystemTime::UNIX_EPOCH
+            + Duration::from_secs(timestamp)
+            + Duration::from_millis(u64::from(timestamp_millis_part.unwrap_or_default()))
             - self.config.flashblocks_leeway_time;
         let now = std::time::SystemTime::now();
         let Some(time_drift) =
@@ -1059,7 +1097,8 @@ where
             message = "Time drift for building round",
             ?target_time,
             time_drift = self.config.block_time.as_millis().saturating_sub(time_drift.as_millis()),
-            ?timestamp
+            timestamp,
+            ?timestamp_millis_part,
         );
         // This is extra check to ensure that we would account at least for block time in case we have any timer discrepancies.
         let time_drift = time_drift.min(self.config.block_time);
@@ -1183,14 +1222,56 @@ where
 
         let state_provider = state.database.as_ref();
         hashed_state = state_provider.hashed_post_state(&state.bundle_state);
-        (state_root, trie_output) =
-            state_provider.state_root_with_updates(hashed_state.clone()).inspect_err(|err| {
-                warn!(target: "payload_builder",
-                    parent_header=%ctx.parent().hash(),
-                    %err,
-                    "failed to calculate state root for payload"
-                );
-            })?;
+        // Prefer QMDB peek when MMR is enabled so headers match engine validation.
+        #[cfg(feature = "mmr")]
+        let qmdb_root = {
+            match reth_provider::mmr::peek_state_root_prefer_path_at_block(
+                ctx.qmdb_db_path.as_deref(),
+                Some(block_number),
+                &hashed_state,
+            ) {
+                Ok(Some(root)) => {
+                    tracing::debug!(
+                        target: "payload_builder",
+                        %root,
+                        "using QMDB peek root as flashblocks stateRoot"
+                    );
+                    if let Some(db_path) = ctx.qmdb_db_path.as_deref() {
+                        reth_provider::mmr::push_pending_hashed_state(
+                            db_path,
+                            block_number,
+                            &hashed_state,
+                        );
+                    }
+                    Some(root)
+                }
+                Ok(None) => None,
+                Err(err) => {
+                    warn!(
+                        target: "payload_builder",
+                        %err,
+                        "QMDB peek root failed; falling back to MPT state root"
+                    );
+                    None
+                }
+            }
+        };
+        #[cfg(not(feature = "mmr"))]
+        let qmdb_root: Option<B256> = None;
+
+        if let Some(root) = qmdb_root {
+            state_root = root;
+            trie_output = TrieUpdates::default();
+        } else {
+            (state_root, trie_output) =
+                state_provider.state_root_with_updates(hashed_state.clone()).inspect_err(|err| {
+                    warn!(target: "payload_builder",
+                        parent_header=%ctx.parent().hash(),
+                        %err,
+                        "failed to calculate state root for payload"
+                    );
+                })?;
+        }
         let state_root_calculation_time = state_root_start_time.elapsed();
         BuilderMetrics::state_root_calculation_duration().record(state_root_calculation_time);
         BuilderMetrics::state_root_calculation_gauge().set(state_root_calculation_time);

@@ -91,6 +91,11 @@ impl<S> FlashblocksServiceBuilder<S> {
             BuilderOutputs { payload_tx: built_payload_tx, ws_pub, rejected_tx_sender },
             self.candidate_source.clone(),
         );
+        #[cfg(feature = "mmr")]
+        let payload_builder = {
+            use reth_provider::DatabaseProviderFactory;
+            payload_builder.with_qmdb_db_path(ctx.provider().db_path())
+        };
         let payload_generator = BlockPayloadJobGenerator::with_builder(
             ctx.provider().clone(),
             ctx.task_executor().clone(),

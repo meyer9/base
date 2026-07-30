@@ -214,6 +214,7 @@ where
                         cancel: Default::default(),
                         best_payload: Default::default(),
                         builder_config: Default::default(),
+                        qmdb_db_path: None,
                     };
 
                     let state_provider = this

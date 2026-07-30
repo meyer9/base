@@ -608,6 +608,10 @@ where
             ctx.node.provider().clone(),
             ctx.node.evm_config().clone(),
         );
+        let builder = {
+            use reth_provider::DatabaseProviderFactory;
+            builder.with_qmdb_db_path(ctx.node.provider().db_path())
+        };
         // Install additional rollup-specific RPC methods.
         let debug_ext = BaseDebugWitnessApi::<_, _, _, Attrs>::new(
             ctx.node.provider().clone(),
@@ -1165,6 +1169,12 @@ where
             )
             .with_transactions(self.best_transactions.clone())
             .set_compute_pending_block(self.compute_pending_block);
+        let payload_builder = {
+            use reth_provider::DatabaseProviderFactory;
+            let path = ctx.provider().db_path();
+            eprintln!("[mmr] wiring payload builder qmdb_db_path={path:?}");
+            payload_builder.with_qmdb_db_path(path)
+        };
         Ok(payload_builder)
     }
 }

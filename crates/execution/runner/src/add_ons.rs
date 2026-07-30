@@ -216,6 +216,10 @@ where
             ctx.node.provider().clone(),
             ctx.node.evm_config().clone(),
         );
+        let builder = {
+            use reth_provider::DatabaseProviderFactory;
+            builder.with_qmdb_db_path(ctx.node.provider().db_path())
+        };
         // Install additional rollup-specific RPC methods.
         let debug_ext = BaseDebugWitnessApi::<_, _, _, Attrs>::new(
             ctx.node.provider().clone(),
