@@ -1292,7 +1292,7 @@ where
     let new_transactions = info.executed_transactions[info.extra.last_flashblock_index..].to_vec();
 
     let new_transactions_encoded =
-        new_transactions.clone().into_iter().map(|tx| tx.encoded_2718().into()).collect::<Vec<_>>();
+        new_transactions.iter().map(|tx| tx.encoded_2718().into()).collect::<Vec<_>>();
 
     let new_receipts = info.receipts[info.extra.last_flashblock_index..].to_vec();
     info.extra.last_flashblock_index = info.executed_transactions.len();
