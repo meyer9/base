@@ -47,74 +47,30 @@ impl KnownRevert {
     /// previous fallback behavior of scanning non-revert transaction manager error
     /// display strings for known custom-error names and selectors.
     pub fn from_tx_manager_error(err: &TxManagerError) -> Option<Self> {
-        let game_exists_selector = game_already_exists_selector();
-        let already_proven = already_proven_selector();
-        let l1_origin_selector = l1_origin_too_old_selector();
-        let invalid_parent_selector = invalid_parent_game_selector();
-        let invalid_signer = invalid_signer_selector();
+        let known_reverts = [
+            (game_already_exists_selector(), GAME_ALREADY_EXISTS, Self::GameAlreadyExists),
+            (already_proven_selector(), ALREADY_PROVEN, Self::ProofAlreadyVerified),
+            (l1_origin_too_old_selector(), L1_ORIGIN_TOO_OLD, Self::L1OriginTooOld),
+            (invalid_parent_game_selector(), INVALID_PARENT_GAME, Self::InvalidParentGame),
+            (invalid_signer_selector(), INVALID_SIGNER, Self::InvalidSigner),
+        ];
 
         if let TxManagerError::ExecutionReverted { reason, data } = err {
-            if reason.as_deref().is_some_and(|r| r.contains(GAME_ALREADY_EXISTS)) {
-                return Some(Self::GameAlreadyExists);
-            }
-            if data.as_ref().is_some_and(|d| d.starts_with(&game_exists_selector)) {
-                return Some(Self::GameAlreadyExists);
-            }
-            if reason.as_deref().is_some_and(|r| r.contains(ALREADY_PROVEN)) {
-                return Some(Self::ProofAlreadyVerified);
-            }
-            if data.as_ref().is_some_and(|d| d.starts_with(&already_proven)) {
-                return Some(Self::ProofAlreadyVerified);
-            }
-            if reason.as_deref().is_some_and(|r| r.contains(L1_ORIGIN_TOO_OLD)) {
-                return Some(Self::L1OriginTooOld);
-            }
-            if data.as_ref().is_some_and(|d| d.starts_with(&l1_origin_selector)) {
-                return Some(Self::L1OriginTooOld);
-            }
-            if reason.as_deref().is_some_and(|r| r.contains(INVALID_PARENT_GAME)) {
-                return Some(Self::InvalidParentGame);
-            }
-            if data.as_ref().is_some_and(|d| d.starts_with(&invalid_parent_selector)) {
-                return Some(Self::InvalidParentGame);
-            }
-            if reason.as_deref().is_some_and(|r| r.contains(INVALID_SIGNER)) {
-                return Some(Self::InvalidSigner);
-            }
-            if data.as_ref().is_some_and(|d| d.starts_with(&invalid_signer)) {
-                return Some(Self::InvalidSigner);
+            for (selector, name, revert) in known_reverts {
+                if reason.as_deref().is_some_and(|reason| reason.contains(name))
+                    || data.as_ref().is_some_and(|data| data.starts_with(&selector))
+                {
+                    return Some(revert);
+                }
             }
             return None;
         }
 
         let msg = err.to_string();
-        if msg.contains(&alloy_primitives::hex::encode(game_exists_selector))
-            || msg.contains(GAME_ALREADY_EXISTS)
-        {
-            return Some(Self::GameAlreadyExists);
-        }
-        if msg.contains(&alloy_primitives::hex::encode(already_proven))
-            || msg.contains(ALREADY_PROVEN)
-        {
-            return Some(Self::ProofAlreadyVerified);
-        }
-        if msg.contains(&alloy_primitives::hex::encode(l1_origin_selector))
-            || msg.contains(L1_ORIGIN_TOO_OLD)
-        {
-            return Some(Self::L1OriginTooOld);
-        }
-        if msg.contains(&alloy_primitives::hex::encode(invalid_parent_selector))
-            || msg.contains(INVALID_PARENT_GAME)
-        {
-            return Some(Self::InvalidParentGame);
-        }
-        if msg.contains(&alloy_primitives::hex::encode(invalid_signer))
-            || msg.contains(INVALID_SIGNER)
-        {
-            return Some(Self::InvalidSigner);
-        }
-
-        None
+        known_reverts.into_iter().find_map(|(selector, name, revert)| {
+            (msg.contains(&alloy_primitives::hex::encode(selector)) || msg.contains(name))
+                .then_some(revert)
+        })
     }
 }
 
