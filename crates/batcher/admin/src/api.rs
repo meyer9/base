@@ -68,9 +68,9 @@ impl BatcherAdminApiServerImpl {
     /// Convert an [`AdminError`] into a JSON-RPC error object.
     fn admin_error(e: AdminError) -> ErrorObjectOwned {
         let code = match e {
-            AdminError::NotSupported(_) => -32601,
             AdminError::ChannelClosed => -32001,
             AdminError::Stopped => -32002,
+            AdminError::NotSupported(_) => -32003,
         };
         ErrorObjectOwned::owned(code, e.to_string(), None::<()>)
     }
@@ -120,10 +120,14 @@ impl BatcherAdminApiServer for BatcherAdminApiServerImpl {
 mod tests {
     use super::*;
 
-    #[test]
-    fn admin_error_not_supported_uses_method_not_found_code() {
-        let err = BatcherAdminApiServerImpl::admin_error(AdminError::NotSupported("test"));
-        assert_eq!(err.code(), -32601);
+    #[tokio::test]
+    async fn set_log_level_returns_server_error_when_unsupported() {
+        let (handle, _rx) = AdminHandle::channel();
+        let server = BatcherAdminApiServerImpl::new(handle);
+
+        let err = server.set_log_level("debug".to_string()).await.unwrap_err();
+
+        assert_eq!(err.code(), -32003);
         assert!(err.message().contains("not yet supported"));
     }
 

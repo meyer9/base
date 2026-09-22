@@ -17,3 +17,6 @@ base-batcher-core.workspace = true
 tracing = { workspace = true, features = ["std"] }
 derive_more = { workspace = true, features = ["debug"] }
 jsonrpsee = { workspace = true, features = ["server", "macros"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

@@ -10,4 +10,4 @@ Lifecycle methods answer once the driver has applied them, not when the command 
 | `admin_getBatcherStatus` | Returns `stopped`, `in_flight` and `da_backlog_bytes`. |
 
 Error codes: `-32001` the driver has shut down, `-32002` the batcher is in the wrong state for the
-request.
+request, `-32003` the requested operation is not supported.
