@@ -10,6 +10,7 @@ use reth_cli_runner::CliRunner;
 use reth_node_core::args::{OtlpInitStatus, OtlpLogsStatus};
 use reth_node_metrics::recorder::install_prometheus_recorder;
 use reth_rpc_server_types::RpcModuleValidator;
+use reth_tasks::{RayonConfig, RuntimeConfig};
 use reth_tracing::{Layers, TracingGuards};
 use tracing::{info, warn};
 
@@ -56,10 +57,7 @@ where
         mut self,
         launcher: impl Launcher<crate::chainspec::BaseChainSpecParser, Ext>,
     ) -> Result<()> {
-        let runner = match self.runner.take() {
-            Some(runner) => runner,
-            None => CliRunner::try_default_runtime()?,
-        };
+        let runner = self.runner()?;
 
         // add network name to logs dir
         // Add network name if available to the logs dir
@@ -132,6 +130,26 @@ where
         }
     }
 
+    /// Returns the supplied runner or creates one configured from the node command.
+    fn runner(&mut self) -> Result<CliRunner> {
+        match self.runner.take() {
+            Some(runner) => Ok(runner),
+            None => {
+                let runtime_config = match &self.cli.command {
+                    Commands::Node(command) => RuntimeConfig::default().with_rayon(RayonConfig {
+                        reserved_cpu_cores: command.engine.reserved_cpu_cores,
+                        proof_storage_worker_threads: command.engine.storage_worker_count,
+                        proof_account_worker_threads: command.engine.account_worker_count,
+                        prewarming_threads: command.engine.prewarming_threads,
+                        ..Default::default()
+                    }),
+                    _ => RuntimeConfig::default(),
+                };
+                Ok(CliRunner::try_with_runtime_config(runtime_config)?)
+            }
+        }
+    }
+
     /// Initializes tracing with the configured options.
     ///
     /// If file logging is enabled, this function stores guard to the struct.
@@ -168,5 +186,33 @@ where
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use crate::{Cli, StandardNodeArgs};
+
+    #[test]
+    fn node_engine_worker_options_configure_reth_runtime() {
+        let cli = Cli::<StandardNodeArgs>::parse_from([
+            "base-reth",
+            "node",
+            "--engine.storage-worker-count",
+            "3",
+            "--engine.account-worker-count",
+            "4",
+            "--engine.prewarming-threads",
+            "5",
+        ]);
+
+        let mut app = cli.configure();
+        let runtime = app.runner().unwrap().runtime();
+
+        assert_eq!(runtime.proof_storage_worker_pool().current_num_threads(), 3);
+        assert_eq!(runtime.proof_account_worker_pool().current_num_threads(), 4);
+        assert_eq!(runtime.prewarming_pool().current_num_threads(), 5);
     }
 }
