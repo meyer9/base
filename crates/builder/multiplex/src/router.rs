@@ -293,7 +293,10 @@ impl MultiplexRouter {
             (self.flashblocks_handle.clone(), FLASHBLOCKS_BUILDER, self.flashblocks_health.clone())
         };
         async move {
-            let result = handle.best_payload(payload_id).await;
+            let result = tokio::select! {
+                result = handle.best_payload(payload_id) => result,
+                _ = tx.closed() => return,
+            };
             let mapped = Self::map_read_result(result, builder, &health);
             let _ = tx.send(mapped);
         }
@@ -313,7 +316,10 @@ impl MultiplexRouter {
             (self.flashblocks_handle.clone(), FLASHBLOCKS_BUILDER, self.flashblocks_health.clone())
         };
         async move {
-            let result = handle.payload_timestamp(payload_id).await;
+            let result = tokio::select! {
+                result = handle.payload_timestamp(payload_id) => result,
+                _ = tx.closed() => return,
+            };
             let mapped = Self::map_read_result(result, builder, &health);
             let _ = tx.send(mapped);
         }
@@ -649,6 +655,46 @@ mod tests {
         tokio::join!(response, inner);
 
         assert!(rx.await.expect("best response").is_none());
+    }
+
+    #[tokio::test]
+    async fn best_payload_stops_when_caller_disconnects() {
+        let (router, mut flash_rx, _) = test_router();
+        let payload_id = payload_id_from_byte(8);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let response = tokio::spawn(router.handle_best_payload(payload_id, tx));
+
+        let flash_cmd = flash_rx.recv().await.expect("flash command");
+        let PayloadServiceCommand::BestPayload(inner_payload_id, _) = flash_cmd else {
+            panic!("expected BestPayload command");
+        };
+        assert_eq!(inner_payload_id, payload_id);
+        drop(rx);
+
+        tokio::time::timeout(Duration::from_secs(1), response)
+            .await
+            .expect("best payload handler should stop after caller disconnects")
+            .expect("best payload handler task");
+    }
+
+    #[tokio::test]
+    async fn payload_timestamp_stops_when_caller_disconnects() {
+        let (router, mut flash_rx, _) = test_router();
+        let payload_id = payload_id_from_byte(10);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let response = tokio::spawn(router.handle_payload_timestamp(payload_id, tx));
+
+        let flash_cmd = flash_rx.recv().await.expect("flash command");
+        let PayloadServiceCommand::PayloadTimestamp(inner_payload_id, _) = flash_cmd else {
+            panic!("expected PayloadTimestamp command");
+        };
+        assert_eq!(inner_payload_id, payload_id);
+        drop(rx);
+
+        tokio::time::timeout(Duration::from_secs(1), response)
+            .await
+            .expect("payload timestamp handler should stop after caller disconnects")
+            .expect("payload timestamp handler task");
     }
 
     #[tokio::test]
