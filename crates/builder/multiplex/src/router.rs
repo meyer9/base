@@ -62,15 +62,9 @@ pub struct BuilderUnavailableError {
 }
 
 /// Boxed future resolving to a built payload, as returned by `resolve_kind`.
-pub type ResolveFuture = std::pin::Pin<
-    Box<
-        dyn std::future::Future<
-                Output = Result<
-                    <BaseEngineTypes as PayloadTypes>::BuiltPayload,
-                    PayloadBuilderError,
-                >,
-            > + Send,
-    >,
+pub type ResolveFuture = BoxFuture<
+    'static,
+    Result<<BaseEngineTypes as PayloadTypes>::BuiltPayload, PayloadBuilderError>,
 >;
 
 /// Router that cuts payload selection from flashblocks to basic when Denim activates.
