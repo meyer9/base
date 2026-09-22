@@ -1,15 +1,12 @@
 # `base-common-chains`
 
-Single source of truth for Base chain configuration and network upgrade bindings.
+Static configuration for supported Base networks and their execution upgrade schedules.
 
 ## Overview
 
-Defines `BaseChainConfig` — a compile-time struct containing all chain parameters (chain IDs,
-upgrade timestamps, genesis data, base fee params, contract addresses, and embedded genesis JSON).
-Const chain configuration instances eliminate duplicated configuration across the workspace.
-
-Also provides the `BaseUpgrade` enum, `BaseUpgrades` trait, and `BaseChainUpgrades` for the
-Base upgrade sequence (Bedrock, Canyon, Ecotone, Fjord, Granite, Holocene, Isthmus, Jovian, Azul).
+`ChainConfig` provides the chain IDs, genesis data, protocol parameters, contract addresses, and
+embedded genesis JSON for Base mainnet, Base Sepolia, Base Zeronet, and the local devnet.
+`ChainUpgrades` exposes each network's activation conditions through the `Upgrades` trait.
 
 ## Usage
 
@@ -18,11 +15,12 @@ Base upgrade sequence (Bedrock, Canyon, Ecotone, Fjord, Granite, Holocene, Isthm
 base-common-chains = { workspace = true }
 ```
 
-```rust,ignore
-use base_common_chains::{BaseChainConfig, BASE_MAINNET};
+```rust
+use base_common_chains::{ChainConfig, ChainUpgrades, Upgrades};
 
-assert_eq!(BASE_MAINNET.chain_id, 8453);
-assert_eq!(BASE_MAINNET.canyon_timestamp, 1_704_992_401);
+let mainnet = ChainConfig::mainnet();
+assert_eq!(mainnet.chain_id, 8453);
+assert!(ChainUpgrades::mainnet().is_canyon_active_at_timestamp(mainnet.canyon_timestamp));
 ```
 
 ## License
