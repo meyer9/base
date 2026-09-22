@@ -204,14 +204,6 @@ where
         })
     }
 
-    /// Returns the wrapped reth pool.
-    pub const fn protocol_pool(
-        &self,
-    ) -> &Pool<TransactionValidationTaskExecutor<BaseTransactionValidator<Client, T, Evm>>, O, S>
-    {
-        &self.protocol_pool
-    }
-
     /// Returns the validator backing the wrapped reth pool.
     pub fn validator(
         &self,
