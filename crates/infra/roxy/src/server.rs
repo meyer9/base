@@ -43,7 +43,7 @@ impl Server {
         // Marked ready before `serve` is first polled. The listener is already bound, so the
         // kernel accept backlog queues any connections that arrive in the gap; they are served
         // as soon as the accept loop runs. Callers see added latency, never a refused connection.
-        ready.store(true, Ordering::SeqCst);
+        ready.store(true, Ordering::Relaxed);
 
         axum::serve(listener, app)
             .with_graceful_shutdown(async move { cancel.cancelled().await })
@@ -112,7 +112,7 @@ mod tests {
             .expect("readyz request while not ready");
         assert_eq!(response.status().as_u16(), 503, "readiness must return 503 before ready");
 
-        ready.store(true, Ordering::SeqCst);
+        ready.store(true, Ordering::Relaxed);
 
         let response = reqwest::get(format!("http://{addr}/readyz"))
             .await
