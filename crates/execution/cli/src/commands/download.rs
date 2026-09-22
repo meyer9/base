@@ -926,6 +926,40 @@ impl ProofsDownloader {
                 );
             }
 
+            // A 206 alone is insufficient: a CDN or proxy can return a valid
+            // partial response for a different byte interval. Writing that body
+            // at the requested offset would silently corrupt the assembled
+            // archive while its final file length still matches the manifest.
+            // Require the response to identify exactly the requested interval
+            // and the immutable archive size before accepting any bytes.
+            let content_range = response
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|value| value.to_str().ok());
+            let expected_end = range.end.saturating_sub(1);
+            let valid_content_range = content_range
+                .and_then(|value| value.strip_prefix("bytes "))
+                .and_then(|value| value.split_once('/'))
+                .and_then(|(range, total)| {
+                    let (start, end) = range.split_once('-')?;
+                    Some((
+                        start.parse::<u64>().ok()?,
+                        end.parse::<u64>().ok()?,
+                        total.parse::<u64>().ok()?,
+                    ))
+                })
+                .is_some_and(|(start, end, total)| {
+                    start == abs_start && end == expected_end && total == range_progress.expected_size
+                });
+            if !valid_content_range {
+                eyre::bail!(
+                    "unexpected Content-Range for proofs range {abs_start}-{expected_end}: \
+                     expected bytes {abs_start}-{expected_end}/{}, got {}",
+                    range_progress.expected_size,
+                    content_range.unwrap_or("missing or invalid header")
+                );
+            }
+
             let content_length = response.content_length();
             let mut file = tokio::fs::OpenOptions::new().write(true).open(part_path).await?;
             file.seek(SeekFrom::Start(abs_start)).await?;
@@ -1127,6 +1161,24 @@ mod tests {
         (base_url, handle)
     }
 
+    async fn start_mismatched_content_range_server(
+        archive_bytes: Vec<u8>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new()
+            .route("/proofs.tar.zst", get(handle_mismatched_content_range))
+            .with_state(archive_bytes);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base_url = format!("http://127.0.0.1:{}", addr.port());
+
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+
+        (base_url, handle)
+    }
+
     fn parse_byte_range(headers: &HeaderMap, len: usize) -> Option<(usize, usize)> {
         let spec = headers.get("Range")?.to_str().ok()?.strip_prefix("bytes=")?;
         let (start, end) = spec.split_once('-')?;
@@ -1143,6 +1195,26 @@ mod tests {
                 [(
                     axum::http::header::CONTENT_RANGE,
                     format!("bytes {start}-{end}/{}", data.len()),
+                )],
+                data[start..=end].to_vec(),
+            )
+                .into_response();
+        }
+        (StatusCode::OK, data).into_response()
+    }
+
+    /// Deliberately returns a 206 body for the requested bytes but labels it as
+    /// a different interval, modeling a broken intermediary cache.
+    async fn handle_mismatched_content_range(
+        State(data): State<Vec<u8>>,
+        headers: HeaderMap,
+    ) -> impl IntoResponse {
+        if let Some((start, end)) = parse_byte_range(&headers, data.len()) {
+            return (
+                StatusCode::PARTIAL_CONTENT,
+                [(
+                    axum::http::header::CONTENT_RANGE,
+                    format!("bytes 0-{end}/{}", data.len()),
                 )],
                 data[start..=end].to_vec(),
             )
@@ -1244,7 +1316,15 @@ mod tests {
             } else {
                 StatusCode::OK
             };
-            return (status, body).into_response();
+            return (
+                status,
+                [(
+                    axum::http::header::CONTENT_RANGE,
+                    format!("bytes {start}-{end}/{}", state.data.len()),
+                )],
+                body,
+            )
+                .into_response();
         }
 
         (
@@ -1906,6 +1986,32 @@ mod tests {
         assert!(
             !cache_dir.path().join("proofs.tar.zst.part.ranges").exists(),
             "range sidecar should be removed after a complete parallel download"
+        );
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn download_archive_rejects_mismatched_content_range() {
+        let archive = create_proofs_archive(&[("proofs/data.mdb", b"range-integrity-guard")]);
+        let (base_url, handle) = start_mismatched_content_range_server(archive.clone()).await;
+        let cache_dir = tempfile::tempdir().unwrap();
+        let entry = ProofsManifestEntry {
+            file_name: "proofs.tar.zst".to_string(),
+            expected_size: archive.len() as u64,
+            archive_url: format!("{base_url}/proofs.tar.zst"),
+        };
+
+        let result = ProofsDownloader::download_archive(&entry, cache_dir.path(), 4).await;
+
+        let error = result.expect_err("mismatched Content-Range must not assemble an archive");
+        assert!(
+            error.to_string().contains("unexpected Content-Range"),
+            "error should identify an invalid range response, got: {error}"
+        );
+        assert!(
+            !cache_dir.path().join("proofs.tar.zst").exists(),
+            "an archive from mismatched ranges must never be published"
         );
 
         handle.abort();
