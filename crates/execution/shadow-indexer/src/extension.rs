@@ -37,11 +37,12 @@ impl BaseNodeExtension for ShadowIndexerExtension {
             return hooks;
         }
 
+        let config = self.cfg;
         let (tx, rx) = mpsc::channel(1024);
-        let db = self.cfg.db.clone();
-        let retention_db = self.cfg.db.clone();
-        let retention = self.cfg.retention;
-        let builder_version = self.cfg.builder_version.clone();
+        let db = config.db;
+        let retention_db = db.clone();
+        let retention = config.retention;
+        let builder_version = config.builder_version;
 
         hooks
             .add_node_started_hook(move |node| {
