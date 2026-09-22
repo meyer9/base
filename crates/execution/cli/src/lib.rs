@@ -115,7 +115,9 @@ where
         L: FnOnce(WithLaunchContext<NodeBuilder<DatabaseEnv, BaseChainSpec>>, Ext) -> Fut,
         Fut: Future<Output = eyre::Result<()>>,
     {
-        self.with_runner(CliRunner::try_default_runtime()?, launcher)
+        self.configure().run(FnLauncher::new::<BaseChainSpecParser, Ext>(async move |builder, chain_spec| {
+            launcher(builder, chain_spec).await
+        }))
     }
 
     /// Execute the configured cli command with the provided [`CliRunner`].
