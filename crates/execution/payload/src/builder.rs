@@ -688,22 +688,31 @@ impl ExecutionInfo {
             return true;
         }
 
-        let total_da_bytes_used = self.cumulative_da_bytes_used.saturating_add(tx_da_size);
+        let Some(total_da_bytes_used) = self.cumulative_da_bytes_used.checked_add(tx_da_size)
+        else {
+            return true;
+        };
 
         if block_data_limit.is_some_and(|da_limit| total_da_bytes_used > da_limit) {
             return true;
         }
 
-        // Post Jovian: the tx DA footprint must be less than the block gas limit
+        // Post Jovian: the tx DA footprint must be less than the block gas limit.
+        // An arithmetic overflow represents a footprint that cannot fit.
         if let Some(da_footprint_gas_scalar) = da_footprint_gas_scalar {
-            let tx_da_footprint =
-                total_da_bytes_used.saturating_mul(da_footprint_gas_scalar as u64);
+            let Some(tx_da_footprint) =
+                total_da_bytes_used.checked_mul(da_footprint_gas_scalar as u64)
+            else {
+                return true;
+            };
             if tx_da_footprint > block_gas_limit {
                 return true;
             }
         }
 
-        self.cumulative_gas_used.saturating_add(tx_reserved_gas) > block_gas_limit
+        self.cumulative_gas_used
+            .checked_add(tx_reserved_gas)
+            .is_none_or(|total_gas_used| total_gas_used > block_gas_limit)
     }
 }
 
@@ -1660,6 +1669,21 @@ mod tests {
 
         // payer_auth metered on top (reserved = 21_000 + 2_100) pushes over the block limit.
         assert!(info.is_tx_over_limits(0, block_gas_limit, None, None, 21_000 + 2_100, None));
+    }
+
+    #[test]
+    fn is_tx_over_limits_rejects_arithmetic_overflow() {
+        let mut info = ExecutionInfo::new();
+        info.cumulative_gas_used = u64::MAX;
+        assert!(info.is_tx_over_limits(0, u64::MAX, None, None, 1, None));
+
+        let mut info = ExecutionInfo::new();
+        info.cumulative_da_bytes_used = u64::MAX;
+        assert!(info.is_tx_over_limits(1, u64::MAX, None, None, 0, None));
+
+        let mut info = ExecutionInfo::new();
+        info.cumulative_da_bytes_used = u64::MAX;
+        assert!(info.is_tx_over_limits(0, u64::MAX, None, None, 0, Some(2)));
     }
 
     #[test]
