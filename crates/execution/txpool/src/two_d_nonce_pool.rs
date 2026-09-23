@@ -295,6 +295,7 @@ impl<T: BasePooledTx> TwoDNoncePool<T> {
             lane.next_nonce = state_nonce;
         }
         let pending_len_before = lane.consecutive_pending_len();
+        let pending_boundary = lane.next_nonce.checked_add(pending_len_before as u64);
 
         if nonce < lane.next_nonce {
             return Err(PoolError::new(
@@ -326,23 +327,26 @@ impl<T: BasePooledTx> TwoDNoncePool<T> {
             self.hashes.remove(&replaced_hash);
         }
 
-        let pending_len_after = lane.consecutive_pending_len();
-        let state = if lane
-            .next_nonce
-            .checked_add(pending_len_after as u64)
-            .is_none_or(|boundary| nonce < boundary)
-        {
+        let state = if pending_boundary.is_none_or(|boundary| nonce <= boundary) {
             AddedTransactionState::Pending
         } else {
             AddedTransactionState::Queued(QueuedReason::NonceGap)
         };
 
-        let promoted = if matches!(state, AddedTransactionState::Pending) {
-            lane.consecutive_pending_transactions()
-                .skip(pending_len_before)
-                .filter(|candidate| *candidate.hash() != hash)
-                .cloned()
-                .collect()
+        let promoted = if pending_boundary == Some(nonce) {
+            let mut expected_nonce = nonce;
+            let mut promoted = Vec::new();
+            for (&candidate_nonce, candidate) in lane.transactions.range(nonce..).skip(1) {
+                let Some(next_nonce) = expected_nonce.checked_add(1) else {
+                    break;
+                };
+                if candidate_nonce != next_nonce {
+                    break;
+                }
+                promoted.push(Arc::clone(candidate));
+                expected_nonce = candidate_nonce;
+            }
+            promoted
         } else {
             Vec::new()
         };
@@ -847,6 +851,48 @@ mod tests {
         assert_eq!(yielded, lane_count);
     }
 
+    fn run_deep_lane_replacement_wall_clock(lane_depth: u64, replacement_count: u128) {
+        let signer = signer();
+        let nonce_key = U256::from(99);
+        let lane_id = (signer.address(), nonce_key);
+        let mut pool = TwoDNoncePool::new(PriceBumpConfig::default());
+        let transactions: BTreeMap<_, _> = (0..lane_depth)
+            .map(|nonce| {
+                let transaction = Arc::new(valid_pool_transaction(signed_channel_tx(
+                    &signer, nonce_key, nonce, 100,
+                )));
+                (nonce, transaction)
+            })
+            .collect();
+        pool.hashes.extend(
+            transactions.values().map(|transaction| (*transaction.hash(), Arc::clone(transaction))),
+        );
+        pool.lanes.insert(lane_id, NonceLane { next_nonce: 0, transactions });
+
+        let replacements: Vec<_> = (1..=replacement_count)
+            .map(|fee| {
+                valid_pool_transaction(signed_channel_tx(
+                    &signer,
+                    nonce_key,
+                    lane_depth - 1,
+                    fee * 1_000,
+                ))
+            })
+            .collect();
+
+        let started = Instant::now();
+        for transaction in replacements {
+            let outcome = pool.insert_validated(transaction, 0).unwrap();
+            assert!(matches!(outcome.outcome.state, AddedTransactionState::Pending));
+            assert!(outcome.promoted.is_empty());
+        }
+        let elapsed = started.elapsed();
+
+        eprintln!(
+            "deep lane replacement: depth={lane_depth}, replacements={replacement_count}, elapsed={elapsed:?}"
+        );
+    }
+
     #[test]
     fn channelized_transactions_with_same_sequence_can_coexist() {
         let mut pool = TwoDNoncePool::new(PriceBumpConfig::default());
@@ -892,6 +938,12 @@ mod tests {
     #[ignore = "wall-clock diagnostic; run explicitly in release mode with --ignored --nocapture"]
     fn best_transactions_wall_clock_100k_lanes() {
         run_best_transactions_wall_clock(100_000);
+    }
+
+    #[test]
+    #[ignore = "wall-clock diagnostic; run explicitly in release mode with --ignored --nocapture"]
+    fn insert_validated_replacement_wall_clock_10k_deep_lane() {
+        run_deep_lane_replacement_wall_clock(10_000, 20);
     }
 
     #[test]
@@ -1020,6 +1072,31 @@ mod tests {
         assert!(pool.get(&original_hash).is_none());
         assert!(pool.get(&replacement_hash).is_some());
         assert_eq!(pool.all_transactions().len(), 1);
+    }
+
+    #[test]
+    fn replacement_at_a_deep_pending_lane_head_does_not_promote_transactions() {
+        let mut pool = TwoDNoncePool::new(PriceBumpConfig::default());
+        let signer = signer();
+        let nonce_key = U256::from(8);
+
+        for nonce in 0..3 {
+            pool.insert_validated(
+                valid_pool_transaction(signed_channel_tx(&signer, nonce_key, nonce, 1_000)),
+                0,
+            )
+            .unwrap();
+        }
+
+        let outcome = pool
+            .insert_validated(valid_pool_transaction(signed_channel_tx(
+                &signer, nonce_key, 2, 1_250,
+            )), 0)
+            .unwrap();
+
+        assert!(matches!(outcome.outcome.state, AddedTransactionState::Pending));
+        assert!(outcome.promoted.is_empty());
+        assert_eq!(pool.pending_and_queued_txn_count(), (3, 0));
     }
 
     #[test]
