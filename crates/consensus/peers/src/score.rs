@@ -1,9 +1,7 @@
 //! Contains peer scoring types.
 
-use std::collections::HashMap;
-
 use derive_more::{Display, FromStr};
-use libp2p::gossipsub::{PeerScoreParams, PeerScoreThresholds, TopicHash, TopicScoreParams};
+use libp2p::gossipsub::{PeerScoreParams, PeerScoreThresholds};
 
 /// The peer scoring level is used to determine
 /// how peers are scored based on their behavior.
@@ -54,72 +52,21 @@ impl PeerScoreLevel {
         (3600 * std::time::Duration::from_secs(1)).as_secs_f64() / slot.as_secs_f64()
     }
 
-    /// Returns the topic score parameters given the block time.
-    pub fn topic_score_params(block_time: u64) -> TopicScoreParams {
-        let slot = std::time::Duration::from_secs(block_time);
-        let epoch = slot * 6;
-        let invalid_decay_period = 50 * epoch;
-        let decay_epoch =
-            std::time::Duration::from_secs(Self::DECAY_EPOCH as u64 * epoch.as_secs());
-        TopicScoreParams {
-            topic_weight: 0.8,
-            time_in_mesh_weight: Self::MAX_IN_MESH_SCORE / Self::in_mesh_cap(slot),
-            time_in_mesh_quantum: slot,
-            time_in_mesh_cap: Self::in_mesh_cap(slot),
-            first_message_deliveries_weight: 1.0,
-            first_message_deliveries_decay: Self::score_decay(20 * epoch, slot),
-            first_message_deliveries_cap: 23.0,
-            mesh_message_deliveries_weight: Self::MESH_WEIGHT,
-            mesh_message_deliveries_decay: Self::score_decay(decay_epoch, slot),
-            mesh_message_deliveries_cap: (epoch.as_secs() / slot.as_secs()) as f64
-                * Self::DECAY_EPOCH,
-            mesh_message_deliveries_threshold: (epoch.as_secs() / slot.as_secs()) as f64
-                * Self::DECAY_EPOCH
-                / 10.0,
-            mesh_message_deliveries_window: std::time::Duration::from_secs(2),
-            mesh_message_deliveries_activation: epoch * 4,
-            mesh_failure_penalty_weight: Self::MESH_WEIGHT,
-            mesh_failure_penalty_decay: Self::score_decay(decay_epoch, slot),
-            invalid_message_deliveries_weight: -140.4475,
-            invalid_message_deliveries_decay: Self::score_decay(invalid_decay_period, slot),
-        }
-    }
-
-    /// Constructs topic scores for the given topics.
-    pub fn topic_scores(
-        topics: Vec<TopicHash>,
-        block_time: u64,
-    ) -> HashMap<TopicHash, TopicScoreParams> {
-        let mut topic_scores = HashMap::with_capacity(topics.len());
-        for topic in topics {
-            debug!(target: "scoring", topic = %topic, "Topic scoring enabled");
-            topic_scores.insert(topic, Self::topic_score_params(block_time));
-        }
-        topic_scores
-    }
-
     /// Returns the [`PeerScoreParams`] for the given peer scoring level.
     ///
     /// # Arguments
     /// * `block_time` - The block time in seconds.
-    pub fn to_params(
-        &self,
-        topics: Vec<TopicHash>,
-        topic_scoring: bool,
-        block_time: u64,
-    ) -> Option<PeerScoreParams> {
+    pub fn to_params(&self, block_time: u64) -> Option<PeerScoreParams> {
         let slot = std::time::Duration::from_secs(block_time);
         debug!(target: "scoring", slot = ?slot, "Slot duration");
         let epoch = slot * 6;
         let ten_epochs = epoch * 10;
         let one_hundred_epochs = epoch * 100;
         let penalty_decay = Self::score_decay(ten_epochs, slot);
-        let topics =
-            if topic_scoring { Self::topic_scores(topics, block_time) } else { Default::default() };
         match self {
             Self::Off => None,
             Self::Light => Some(PeerScoreParams {
-                topics,
+                topics: Default::default(),
                 topic_score_cap: 34.0,
                 app_specific_weight: 1.0,
                 ip_colocation_factor_weight: -35.0,
@@ -141,5 +88,17 @@ impl PeerScoreLevel {
     /// Returns the [`PeerScoreThresholds`].
     pub const fn thresholds() -> PeerScoreThresholds {
         Self::DEFAULT_PEER_SCORE_THRESHOLDS
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PeerScoreLevel;
+
+    #[test]
+    fn light_scoring_has_no_topic_scores() {
+        let params = PeerScoreLevel::Light.to_params(2).expect("light scoring should have params");
+
+        assert!(params.topics.is_empty());
     }
 }

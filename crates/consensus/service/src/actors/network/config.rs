@@ -35,8 +35,6 @@ pub struct NetworkConfig {
     pub gossip_config: libp2p::gossipsub::Config,
     /// The peer score level.
     pub scoring: PeerScoreLevel,
-    /// Whether to enable topic scoring.
-    pub topic_scoring: bool,
     /// Peer score monitoring config.
     pub monitor_peers: Option<PeerMonitoring>,
     /// An optional path to the bootstore.
@@ -101,7 +99,6 @@ impl NetworkConfig {
                 base_consensus_gossip::DEFAULT_MAX_IDENTIFY_PEERSTORE_PEERS,
             gossip_config: base_consensus_gossip::default_config(),
             scoring: Default::default(),
-            topic_scoring: Default::default(),
             monitor_peers: Default::default(),
             gossip_signer: Default::default(),
         }
