@@ -153,8 +153,7 @@ impl P2pRpcRequest {
     }
 
     fn block_peer<G: ConnectionGate>(id: PeerId, gossip: &mut GossipDriver<G>) {
-        gossip.connection_gate.block_peer(&id);
-        gossip.swarm.behaviour_mut().gossipsub.blacklist_peer(&id);
+        gossip.block_peer(id);
     }
 
     fn unblock_peer<G: ConnectionGate>(id: PeerId, gossip: &mut GossipDriver<G>) {

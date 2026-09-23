@@ -376,6 +376,22 @@ where
         count
     }
 
+    /// Blocks a peer from future connections and immediately terminates any existing connection.
+    ///
+    /// A blocklist entry alone only affects connection admission. Closing an
+    /// established connection makes the operator action effective for a peer
+    /// that is already connected.
+    pub fn block_peer(&mut self, peer_id: PeerId) {
+        self.connection_gate.block_peer(&peer_id);
+        self.swarm.behaviour_mut().gossipsub.blacklist_peer(&peer_id);
+
+        if self.swarm.connected_peers().any(|connected| connected == &peer_id)
+            && let Err(error) = self.swarm.disconnect_peer_id(peer_id)
+        {
+            warn!(target: "gossip", peer_id = %peer_id, error = ?error, "Failed to disconnect blocked peer");
+        }
+    }
+
     fn handle_gossip_event(&mut self, event: Event) -> Option<NetworkPayloadEnvelope> {
         match event {
             Event::Gossipsub(e) => return self.handle_gossipsub_event(*e),
@@ -1053,6 +1069,60 @@ mod tests {
         }
 
         assert!(!dialer.connection_gate.current_dials.contains_key(&listener_peer_id));
+    }
+
+    #[tokio::test]
+    async fn blocking_connected_peer_terminates_the_existing_connection() {
+        let mut dialer = test_driver();
+        let mut listener = test_driver();
+        let listener_peer_id = *listener.local_peer_id();
+        let mut listener_addr = listener.start().await.unwrap();
+        listener_addr.push(libp2p::multiaddr::Protocol::P2p(listener_peer_id));
+
+        dialer.dial_multiaddr(listener_addr);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while tokio::time::Instant::now() < deadline
+            && !dialer.swarm.connected_peers().any(|peer_id| peer_id == &listener_peer_id)
+        {
+            tokio::select! {
+                event = dialer.next() => {
+                    if let Some(event) = event {
+                        dialer.handle_event(event);
+                    }
+                }
+                event = listener.next() => {
+                    if let Some(event) = event {
+                        listener.handle_event(event);
+                    }
+                }
+                _ = tokio::time::sleep_until(deadline) => break,
+            }
+        }
+        assert!(dialer.swarm.connected_peers().any(|peer_id| peer_id == &listener_peer_id));
+
+        dialer.block_peer(listener_peer_id);
+        assert!(dialer.connection_gate.list_blocked_peers().contains(&listener_peer_id));
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while tokio::time::Instant::now() < deadline
+            && dialer.swarm.connected_peers().any(|peer_id| peer_id == &listener_peer_id)
+        {
+            tokio::select! {
+                event = dialer.next() => {
+                    if let Some(event) = event {
+                        dialer.handle_event(event);
+                    }
+                }
+                event = listener.next() => {
+                    if let Some(event) = event {
+                        listener.handle_event(event);
+                    }
+                }
+                _ = tokio::time::sleep_until(deadline) => break,
+            }
+        }
+
+        assert!(!dialer.swarm.connected_peers().any(|peer_id| peer_id == &listener_peer_id));
     }
 
     #[test]
