@@ -14,7 +14,6 @@ use base_observability_events::{
     DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_FILES, DEFAULT_QUEUE_CAPACITY, TransactionEventProducer,
     TransactionEventWriterConfig,
 };
-use tracing::warn;
 
 /// Parameters for Flashblocks configuration.
 ///
@@ -152,26 +151,6 @@ pub struct Args {
     /// Maximum execution time per transaction in microseconds (requires resource metering)
     #[arg(long = "builder.max-execution-time-per-tx-us")]
     pub max_execution_time_per_tx_us: Option<u128>,
-
-    /// Deprecated and ignored. Kept so older deployment configurations remain accepted.
-    /// Scheduled for removal in v1.4.0 after rolling deployments have migrated.
-    #[arg(long = "builder.flashblock-execution-time-budget-us", hide = true)]
-    pub flashblock_execution_time_budget_us: Option<u128>,
-
-    /// Deprecated and ignored. Kept so older deployment configurations remain accepted.
-    /// Scheduled for removal in v1.4.0 after rolling deployments have migrated.
-    #[arg(long = "builder.block-state-root-gas-limit", hide = true)]
-    pub block_state_root_gas_limit: Option<u64>,
-
-    /// Deprecated and ignored. Kept so older deployment configurations remain accepted.
-    /// Scheduled for removal in v1.4.0 after rolling deployments have migrated.
-    #[arg(long = "builder.state-root-gas-coefficient", hide = true)]
-    pub state_root_gas_coefficient: Option<f64>,
-
-    /// Deprecated and ignored. Kept so older deployment configurations remain accepted.
-    /// Scheduled for removal in v1.4.0 after rolling deployments have migrated.
-    #[arg(long = "builder.state-root-gas-anchor-us", hide = true)]
-    pub state_root_gas_anchor_us: Option<u128>,
 
     /// Execution metering mode: off, dry-run, or enforce
     #[arg(long = "builder.execution-metering-mode", value_enum, default_value = "off")]
@@ -340,10 +319,6 @@ impl Default for Args {
             chain_block_time: 1000,
             max_gas_per_txn: None,
             max_execution_time_per_tx_us: None,
-            flashblock_execution_time_budget_us: None,
-            block_state_root_gas_limit: None,
-            state_root_gas_coefficient: None,
-            state_root_gas_anchor_us: None,
             execution_metering_mode: ExecutionMeteringMode::Off,
             extra_block_deadline_secs: 20,
             enable_resource_metering: false,
@@ -399,14 +374,6 @@ impl Args {
         self,
         metering_provider: SharedMeteringProvider,
     ) -> eyre::Result<BuilderConfig> {
-        if self.flashblock_execution_time_budget_us.is_some()
-            || self.block_state_root_gas_limit.is_some()
-            || self.state_root_gas_coefficient.is_some()
-            || self.state_root_gas_anchor_us.is_some()
-        {
-            warn!("deprecated builder resource limit flags are ignored");
-        }
-
         let flashblocks_ws_addr = SocketAddr::new(
             self.flashblocks.flashblocks_addr.parse()?,
             self.flashblocks.flashblocks_port,
@@ -756,24 +723,18 @@ mod tests {
     }
 
     #[test]
-    fn deprecated_resource_limit_flags_remain_accepted() {
-        let args = CommandParser::parse_from([
-            "builder",
+    fn deprecated_resource_limit_flags_are_rejected() {
+        for flag in [
             "--builder.flashblock-execution-time-budget-us",
-            "5000000",
             "--builder.block-state-root-gas-limit",
-            "1000000",
             "--builder.state-root-gas-coefficient",
-            "0.1",
             "--builder.state-root-gas-anchor-us",
-            "5000",
-        ])
-        .args;
+        ] {
+            let error = CommandParser::try_parse_from(["builder", flag, "1"])
+                .expect_err("removed resource limit flags must be rejected");
 
-        assert_eq!(args.flashblock_execution_time_budget_us, Some(5_000_000));
-        assert_eq!(args.block_state_root_gas_limit, Some(1_000_000));
-        assert_eq!(args.state_root_gas_coefficient, Some(0.1));
-        assert_eq!(args.state_root_gas_anchor_us, Some(5_000));
+            assert!(error.to_string().contains(flag));
+        }
     }
 
     #[test]
