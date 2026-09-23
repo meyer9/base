@@ -4,11 +4,12 @@
 
 use std::{
     fmt::Debug,
+    future::Future,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use alloy_eips::BlockNumberOrTag;
@@ -42,6 +43,8 @@ pub struct RollupRpc<EngineRpcClient_> {
     pub l1_watcher_sender: L1WatcherQuerySender,
     /// Reader for safe head lookups by L1 block number.
     pub safe_db_reader: Arc<dyn SafeDBReader>,
+    /// Maximum time an RPC call can wait for an internal actor response.
+    pub request_timeout: Duration,
 }
 
 impl<EngineRpcClient_: EngineRpcClient> RollupRpc<EngineRpcClient_> {
@@ -50,8 +53,45 @@ impl<EngineRpcClient_: EngineRpcClient> RollupRpc<EngineRpcClient_> {
         engine_client: EngineRpcClient_,
         l1_watcher_sender: L1WatcherQuerySender,
         safe_db_reader: Arc<dyn SafeDBReader>,
+        request_timeout: Duration,
     ) -> Self {
-        Self { engine_client, l1_watcher_sender, safe_db_reader }
+        Self { engine_client, l1_watcher_sender, safe_db_reader, request_timeout }
+    }
+
+    pub async fn await_internal<T, Request>(
+        &self,
+        operation: &'static str,
+        request: Request,
+    ) -> RpcResult<T>
+    where
+        Request: Future<Output = RpcResult<T>>,
+    {
+        tokio::time::timeout(self.request_timeout, request).await.map_err(|_| {
+            warn!(
+                target: "rpc",
+                operation,
+                timeout_ms = self.request_timeout.as_millis() as u64,
+                "Timed out waiting for an internal RPC dependency"
+            );
+            ErrorObject::owned(
+                ErrorCode::InternalError.code(),
+                "Timed out waiting for an internal node component",
+                None::<()>,
+            )
+        })?
+    }
+
+    pub async fn l1_state(&self) -> RpcResult<L1State> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+
+        self.await_internal("L1 watcher state", async {
+            self.l1_watcher_sender
+                .send(L1WatcherQueries::L1State(sender))
+                .await
+                .map_err(|_| ErrorObject::from(ErrorCode::InternalError))?;
+            receiver.await.map_err(|_| ErrorObject::from(ErrorCode::InternalError))
+        })
+        .await
     }
 
     // Important note: we zero-out the fields that can't be derived yet to follow the reference node's
@@ -84,7 +124,6 @@ impl<EngineRpcClient_: EngineRpcClient + 'static> RollupNodeApiServer
         Metrics::rpc_calls("base_outputAtBlock").increment(1.0);
 
         let request_id = RPC_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
-        let (l1_sync_status_send, l1_sync_status_recv) = tokio::sync::oneshot::channel();
         let request_started_at = Instant::now();
         let span = info_span!(
             target: "rpc",
@@ -97,16 +136,9 @@ impl<EngineRpcClient_: EngineRpcClient + 'static> RollupNodeApiServer
         info!(target: "rpc", request_id, rpc_method = RPC_METHOD, block = ?block_num, "Started rollup RPC request");
 
         let ((l2_block_info, output_root, l2_sync_status), l1_sync_status) = tokio::try_join!(
-            self.engine_client.output_at_block(block_num).instrument(span.clone()),
-            async {
-                self.l1_watcher_sender
-                    .send(L1WatcherQueries::L1State(l1_sync_status_send))
-                    .await
-                    .map_err(|_| ErrorObject::from(ErrorCode::InternalError))?;
-
-                l1_sync_status_recv.await.map_err(|_| ErrorObject::from(ErrorCode::InternalError))
-            }
-            .instrument(span.clone())
+            self.await_internal("engine output", self.engine_client.output_at_block(block_num))
+                .instrument(span.clone()),
+            self.l1_state().instrument(span.clone())
         )
         .map_err(|error| {
             warn!(
@@ -172,7 +204,6 @@ impl<EngineRpcClient_: EngineRpcClient + 'static> RollupNodeApiServer
         Metrics::rpc_calls("base_syncStatus").increment(1.0);
 
         let request_id = RPC_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
-        let (l1_sync_status_send, l1_sync_status_recv) = tokio::sync::oneshot::channel();
         let request_started_at = Instant::now();
         let span = info_span!(
             target: "rpc",
@@ -184,15 +215,9 @@ impl<EngineRpcClient_: EngineRpcClient + 'static> RollupNodeApiServer
         debug!(target: "rpc", request_id, rpc_method = RPC_METHOD, "Started rollup RPC request");
 
         let (l1_sync_status, l2_sync_status) = tokio::try_join!(
-            async {
-                self.l1_watcher_sender
-                    .send(L1WatcherQueries::L1State(l1_sync_status_send))
-                    .await
-                    .map_err(|_| ErrorObject::from(ErrorCode::InternalError))?;
-                l1_sync_status_recv.await.map_err(|_| ErrorObject::from(ErrorCode::InternalError))
-            }
-            .instrument(span.clone()),
-            self.engine_client.get_state().instrument(span.clone())
+            self.l1_state().instrument(span.clone()),
+            self.await_internal("engine state", self.engine_client.get_state())
+                .instrument(span.clone())
         )
         .map_err(|error| {
             warn!(
@@ -229,5 +254,92 @@ impl<EngineRpcClient_: EngineRpcClient + 'static> RollupNodeApiServer
         const RPC_VERSION: &str = env!("CARGO_PKG_VERSION");
 
         return Ok(RPC_VERSION.to_string());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The `EngineRpcClient` double is hand-rolled because `automock` cannot
+    //! implement its required `Clone` supertrait.
+
+    use std::{future::pending, sync::Arc, time::Duration};
+
+    use alloy_eips::BlockNumberOrTag;
+    use alloy_primitives::B256;
+    use async_trait::async_trait;
+    use base_common_genesis::RollupConfig;
+    use base_consensus_engine::EngineState;
+    use base_consensus_safedb::DisabledSafeDB;
+    use base_protocol::{L2BlockInfo, OutputRoot};
+    use jsonrpsee::{core::RpcResult, types::ErrorCode};
+    use tokio::sync::{mpsc, watch};
+
+    use super::RollupRpc;
+    use crate::{EngineRpcClient, RollupNodeApiServer};
+
+    #[derive(Clone, Debug)]
+    struct ResponsiveEngine;
+
+    #[async_trait]
+    impl EngineRpcClient for ResponsiveEngine {
+        async fn get_config(&self) -> RpcResult<RollupConfig> {
+            Ok(RollupConfig::default())
+        }
+
+        async fn get_state(&self) -> RpcResult<EngineState> {
+            Ok(EngineState::default())
+        }
+
+        async fn output_at_block(
+            &self,
+            _: BlockNumberOrTag,
+        ) -> RpcResult<(L2BlockInfo, OutputRoot, EngineState)> {
+            Ok((
+                L2BlockInfo::default(),
+                OutputRoot::from_parts(B256::ZERO, B256::ZERO, B256::ZERO),
+                EngineState::default(),
+            ))
+        }
+
+        async fn dev_get_task_queue_length(&self) -> RpcResult<usize> {
+            Ok(0)
+        }
+
+        async fn dev_subscribe_to_engine_queue_length(&self) -> RpcResult<watch::Receiver<usize>> {
+            let (_, receiver) = watch::channel(0);
+            Ok(receiver)
+        }
+
+        async fn dev_subscribe_to_engine_state(&self) -> RpcResult<watch::Receiver<EngineState>> {
+            let (_, receiver) = watch::channel(EngineState::default());
+            Ok(receiver)
+        }
+    }
+
+    fn rpc_with_unresponsive_l1_watcher() -> RollupRpc<ResponsiveEngine> {
+        let (sender, receiver) = mpsc::channel(1);
+        tokio::spawn(async move {
+            let _receiver = receiver;
+            pending::<()>().await;
+        });
+        RollupRpc::new(ResponsiveEngine, sender, Arc::new(DisabledSafeDB), Duration::from_millis(1))
+    }
+
+    #[tokio::test]
+    async fn sync_status_times_out_when_l1_watcher_does_not_reply() {
+        let error = rpc_with_unresponsive_l1_watcher().sync_status().await.unwrap_err();
+
+        assert_eq!(error.code(), ErrorCode::InternalError.code());
+    }
+
+    #[tokio::test]
+    async fn output_at_block_times_out_when_l1_watcher_does_not_reply() {
+        let error = rpc_with_unresponsive_l1_watcher()
+            .output_at_block(BlockNumberOrTag::Number(1))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), ErrorCode::InternalError.code());
+        assert_eq!(error.message(), "Timed out waiting for an internal node component");
     }
 }
