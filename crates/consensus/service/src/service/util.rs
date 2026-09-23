@@ -39,15 +39,21 @@ macro_rules! spawn_and_wait {
             }
         )*
 
-        // Create the shutdown signal future
+        // Create the shutdown signal future. Keep a clone for the external cancellation
+        // branch so callers can request the same graceful drain programmatically.
         let shutdown = $crate::ShutdownSignal::wait();
         tokio::pin!(shutdown);
+        let shutdown_cancellation = $cancellation.clone();
 
         loop {
             tokio::select! {
                 _ = &mut shutdown => {
                     info!(target: "rollup_node", "Received shutdown signal, initiating graceful shutdown...");
                     $cancellation.cancel();
+                    break;
+                }
+                _ = shutdown_cancellation.cancelled() => {
+                    info!(target: "rollup_node", "Cancellation requested, waiting for actors to stop...");
                     break;
                 }
                 result = task_handles.join_next() => {
@@ -69,6 +75,21 @@ macro_rules! spawn_and_wait {
                         }
                         None => break, // All tasks completed
                     }
+                }
+            }
+        }
+
+        // Do not drop the JoinSet after a graceful shutdown request: dropping it aborts
+        // remaining actors before they can flush their operator-owned state.
+        while let Some(result) = task_handles.join_next().await {
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    error!(target: "rollup_node", error = %error, "Actor failed while shutting down");
+                }
+                Err(error) if error.is_cancelled() => {}
+                Err(error) => {
+                    error!(target: "rollup_node", error = %error, "Actor join failed while shutting down");
                 }
             }
         }
@@ -108,5 +129,67 @@ impl ShutdownSignal {
                 info!(target: "rollup_node", "Received SIGTERM");
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use async_trait::async_trait;
+    use tokio::{
+        sync::oneshot,
+        time::{Duration, timeout},
+    };
+    use tokio_util::sync::CancellationToken;
+
+    use crate::NodeActor;
+
+    struct ShutdownAwareActor {
+        stopped: oneshot::Sender<()>,
+    }
+
+    #[async_trait]
+    impl NodeActor for ShutdownAwareActor {
+        type Error = ();
+        type StartData = CancellationToken;
+
+        async fn start(self, cancellation: Self::StartData) -> Result<(), Self::Error> {
+            cancellation.cancelled().await;
+            let _ = self.stopped.send(());
+            Ok(())
+        }
+    }
+
+    async fn run_until_cancelled(
+        cancellation: CancellationToken,
+        actor: ShutdownAwareActor,
+    ) -> Result<(), String> {
+        crate::service::spawn_and_wait!(
+            cancellation,
+            actors = [Some((actor, cancellation.clone()))]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn external_cancellation_waits_for_actor_shutdown() {
+        let cancellation = CancellationToken::new();
+        let (stopped_tx, stopped_rx) = oneshot::channel();
+        let task = tokio::spawn(run_until_cancelled(
+            cancellation.clone(),
+            ShutdownAwareActor { stopped: stopped_tx },
+        ));
+
+        tokio::task::yield_now().await;
+        cancellation.cancel();
+
+        timeout(Duration::from_secs(1), stopped_rx)
+            .await
+            .expect("actor should receive cancellation before service exits")
+            .expect("actor should report graceful shutdown");
+        timeout(Duration::from_secs(1), task)
+            .await
+            .expect("service should finish after draining actors")
+            .expect("service task should not panic")
+            .expect("service should stop cleanly");
     }
 }
