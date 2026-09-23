@@ -23,6 +23,14 @@ pub enum ConfigError {
     /// Failed to find configuration in a built-in mapping.
     #[error("failed to find config for chain ID {0}")]
     NotFound(u64),
+    /// The custom L2 configuration does not match the selected chain.
+    #[error("custom L2 config chain ID {configured} does not match selected chain ID {requested}")]
+    ChainIdMismatch {
+        /// Chain ID selected by `--chain`.
+        requested: u64,
+        /// Chain ID declared by the custom L2 config.
+        configured: u64,
+    },
 }
 
 /// L1 configuration file path wrapper.
@@ -95,17 +103,25 @@ impl L2ConfigFile {
 
     /// Loads the L2 rollup configuration.
     ///
-    /// If a file path is set, loads the configuration from the JSON file.
-    /// Otherwise, falls back to the built-in Base chain config using the provided chain.
+    /// If a file path is set, loads the configuration from the JSON file and verifies that its
+    /// chain ID matches the selected chain. Otherwise, falls back to the built-in Base chain
+    /// config using the provided chain.
     pub fn load(&self, l2_chain: &Chain) -> Result<RollupConfig, ConfigError> {
         match &self.l2_config_file {
             Some(path) => {
-                debug!(path = ?path, "Loading l2 config from file");
+                debug!(path = ?path, "loading L2 config from file");
                 let file = File::open(path).map_err(ConfigError::OpenFile)?;
-                from_reader(file).map_err(ConfigError::Parse)
+                let config: RollupConfig = from_reader(file).map_err(ConfigError::Parse)?;
+                if config.l2_chain_id != *l2_chain {
+                    return Err(ConfigError::ChainIdMismatch {
+                        requested: l2_chain.id(),
+                        configured: config.l2_chain_id.id(),
+                    });
+                }
+                Ok(config)
             }
             None => {
-                debug!("loading l2 config from built-in chain config");
+                debug!("loading L2 config from built-in chain config");
                 base_common_chains::rollup_config!(l2_chain)
                     .ok_or_else(|| ConfigError::NotFound(l2_chain.id()))
             }
@@ -115,7 +131,18 @@ impl L2ConfigFile {
 
 #[cfg(test)]
 mod tests {
+    use alloy_chains::Chain;
+    use base_common_genesis::RollupConfig;
+    use tempfile::NamedTempFile;
+
     use super::*;
+
+    fn l2_config_file(chain_id: u64) -> NamedTempFile {
+        let file = NamedTempFile::new().unwrap();
+        let config = RollupConfig { l2_chain_id: Chain::from(chain_id), ..Default::default() };
+        serde_json::to_writer(&file, &config).unwrap();
+        file
+    }
 
     #[test]
     fn test_l1_config_file_default() {
@@ -141,5 +168,28 @@ mod tests {
         let path = PathBuf::from("/tmp/l2_config.json");
         let config = L2ConfigFile::new(Some(path.clone()));
         assert_eq!(config.path(), Some(&path));
+    }
+
+    #[test]
+    fn loads_custom_l2_config_for_selected_chain() {
+        let file = l2_config_file(8453);
+        let config = L2ConfigFile::new(Some(file.path().to_path_buf()));
+
+        let loaded = config.load(&Chain::from(8453_u64)).unwrap();
+
+        assert_eq!(loaded.l2_chain_id, Chain::from(8453_u64));
+    }
+
+    #[test]
+    fn rejects_custom_l2_config_for_another_chain() {
+        let file = l2_config_file(84532);
+        let config = L2ConfigFile::new(Some(file.path().to_path_buf()));
+
+        let error = config.load(&Chain::from(8453_u64)).unwrap_err();
+
+        assert!(matches!(
+            error,
+            ConfigError::ChainIdMismatch { requested: 8453, configured: 84532 }
+        ));
     }
 }
