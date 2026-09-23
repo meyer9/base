@@ -81,6 +81,22 @@ impl HealthcheckConfig {
     ) -> Self {
         Self { poll_interval_ms, grace_period_ms, unhealthy_node_threshold_ms }
     }
+
+    /// Returns the age of a whole-second block timestamp at an observed Unix time.
+    pub const fn block_age_ms(&self, now_ms: u64, block_timestamp_unix_seconds: u64) -> u64 {
+        now_ms.saturating_sub(block_timestamp_unix_seconds.saturating_mul(1_000))
+    }
+
+    /// Classifies a measured block age against the configured health thresholds.
+    pub const fn classify_block_age(&self, block_age_ms: u64) -> HealthState {
+        if block_age_ms >= self.unhealthy_node_threshold_ms {
+            HealthState::Unhealthy
+        } else if block_age_ms > self.grace_period_ms {
+            HealthState::Delayed
+        } else {
+            HealthState::Healthy
+        }
+    }
 }
 
 /// The RPC target of a health checker plus a bootstrap flag.
@@ -200,23 +216,18 @@ impl<C: EthClient> BlockProductionHealthChecker<C> {
         };
 
         // Compute block age
-        let now_secs = SystemTime::now()
+        let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap_or_else(|_| Duration::from_secs(0))
-            .as_secs();
-        let block_age_ms = now_secs.saturating_sub(latest.timestamp_unix_seconds) * 1000;
-
-        let unhealthy_ms = self.config.unhealthy_node_threshold_ms;
-        let grace_ms = self.config.grace_period_ms;
+            .unwrap_or(Duration::ZERO)
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        let block_age_ms = self.config.block_age_ms(now_ms, latest.timestamp_unix_seconds);
 
         let state = if self.node.is_new_instance {
             HealthState::Healthy
-        } else if block_age_ms >= unhealthy_ms {
-            HealthState::Unhealthy
-        } else if block_age_ms > grace_ms {
-            HealthState::Delayed
         } else {
-            HealthState::Healthy
+            self.config.classify_block_age(block_age_ms)
         };
         self.status_code.store(state.code(), Ordering::Relaxed);
 
@@ -308,6 +319,16 @@ mod tests {
         let sink = UdpMetricSink::from("127.0.0.1:8125", socket).unwrap();
         let statsd_client = StatsdClient::from_sink("test", sink);
         HealthcheckMetrics::new(statsd_client)
+    }
+
+    #[test]
+    fn classifies_whole_second_timestamps_at_millisecond_thresholds() {
+        let config = HealthcheckConfig::new(1_000, 1_500, 2_500);
+
+        assert_eq!(config.classify_block_age(config.block_age_ms(2_500, 1)), HealthState::Healthy);
+        assert_eq!(config.classify_block_age(config.block_age_ms(2_501, 1)), HealthState::Delayed);
+        assert_eq!(config.classify_block_age(config.block_age_ms(3_499, 1)), HealthState::Delayed);
+        assert_eq!(config.classify_block_age(config.block_age_ms(3_500, 1)), HealthState::Unhealthy);
     }
 
     #[tokio::test(flavor = "current_thread")]
