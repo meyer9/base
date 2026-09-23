@@ -321,6 +321,15 @@ impl BaseChainSpec {
 
     /// Returns a runtime upgrade override for an execution fork condition.
     pub fn runtime_fork_condition<H: Hardfork + ?Sized>(&self, fork: &H) -> Option<ForkCondition> {
+        if let Some(ethereum_fork) = EthereumHardfork::VARIANTS
+            .iter()
+            .copied()
+            .find(|ethereum_fork| ethereum_fork.name() == fork.name())
+            && let Some(base_upgrade) = BaseUpgrade::from_ethereum_hardfork(ethereum_fork)
+        {
+            return self.runtime_execution_fork_condition(base_upgrade);
+        }
+
         let upgrade_id = BaseUpgrade::from_contract_fork_name(fork.name())?;
         RuntimeUpgradeRegistry::activation(self.chain().id(), upgrade_id).map(|activation| {
             match activation {
@@ -328,6 +337,23 @@ impl BaseChainSpec {
                 UpgradeActivation::Timestamp(timestamp) => ForkCondition::Timestamp(timestamp),
             }
         })
+    }
+
+    /// Returns the effective Ethereum execution condition beginning at `base_upgrade`.
+    ///
+    /// Later Base upgrades retain every earlier Ethereum execution rule. A runtime schedule may
+    /// therefore contain Cobalt or Denim while clearing the earlier Azul entry that first mapped
+    /// Osaka onto Base. In that state, use the first active Base execution upgrade at or after the
+    /// mapped upgrade rather than advertising the earlier Ethereum fork as disabled.
+    pub fn runtime_execution_fork_condition(
+        &self,
+        base_upgrade: BaseUpgrade,
+    ) -> Option<ForkCondition> {
+        let index = base_upgrade.execution_idx()?;
+        BaseUpgrade::EXECUTION_VARIANTS[index..]
+            .iter()
+            .map(|upgrade| self.fork(*upgrade))
+            .find(|condition| !matches!(condition, ForkCondition::Never))
     }
 
     /// Returns hardforks with runtime overrides materialized into the schedule.
@@ -340,6 +366,22 @@ impl BaseChainSpec {
                     UpgradeActivation::Timestamp(timestamp) => ForkCondition::Timestamp(timestamp),
                 };
                 Self::set_hardfork_activation_condition_for(&mut hardforks, hardfork_id, condition);
+            }
+        }
+
+        // The hardfork schedule also carries Ethereum's execution gates. Restore their inherited
+        // conditions after applying direct Base overrides: later Base upgrades retain the prior
+        // Ethereum rules even when a compact runtime schedule clears the original mapped entry.
+        for ethereum_fork in [
+            EthereumHardfork::Shanghai,
+            EthereumHardfork::Cancun,
+            EthereumHardfork::Prague,
+            EthereumHardfork::Osaka,
+        ] {
+            let base_upgrade = BaseUpgrade::from_ethereum_hardfork(ethereum_fork)
+                .expect("mapped Base execution upgrade");
+            if let Some(condition) = self.runtime_execution_fork_condition(base_upgrade) {
+                hardforks.insert(ethereum_fork, condition);
             }
         }
 
@@ -935,6 +977,44 @@ mod tests {
         assert_eq!(spec.fork(EthereumHardfork::Osaka), ForkCondition::Never);
         assert_eq!(spec.fork(BaseUpgrade::Azul), ForkCondition::Never);
         assert_eq!(spec.fork(BaseUpgrade::Cobalt), ForkCondition::Never);
+
+        RuntimeUpgradeRegistry::clear_chain(chain_id);
+    }
+
+    #[test]
+    fn later_runtime_upgrade_keeps_inherited_ethereum_execution_forks_active() {
+        let chain_id = 9_100_009;
+        RuntimeUpgradeRegistry::clear_chain(chain_id);
+        let spec = BaseChainSpecBuilder::default()
+            .chain(Chain::from_id(chain_id))
+            .genesis(Genesis::default())
+            .with_fork(EthereumHardfork::Shanghai, ForkCondition::Never)
+            .with_fork(EthereumHardfork::Cancun, ForkCondition::Never)
+            .with_fork(EthereumHardfork::Prague, ForkCondition::Never)
+            .with_fork(EthereumHardfork::Osaka, ForkCondition::Never)
+            .with_fork(BaseUpgrade::Canyon, ForkCondition::Never)
+            .with_fork(BaseUpgrade::Ecotone, ForkCondition::Never)
+            .with_fork(BaseUpgrade::Isthmus, ForkCondition::Never)
+            .with_fork(BaseUpgrade::Azul, ForkCondition::Never)
+            .with_fork(BaseUpgrade::Cobalt, ForkCondition::Never)
+            .build();
+
+        RuntimeUpgradeRegistry::set_activation_timestamp(chain_id, BaseUpgrade::Cobalt, 84);
+
+        // Cobalt retains the full Osaka execution era. The EL must therefore advertise all of its
+        // inherited Ethereum gates, even when a compact schedule has no older Base entries.
+        for ethereum_fork in [
+            EthereumHardfork::Shanghai,
+            EthereumHardfork::Cancun,
+            EthereumHardfork::Prague,
+            EthereumHardfork::Osaka,
+        ] {
+            assert_eq!(spec.fork(ethereum_fork), ForkCondition::Timestamp(84));
+            assert_eq!(
+                spec.runtime_chain_spec().fork(ethereum_fork),
+                ForkCondition::Timestamp(84)
+            );
+        }
 
         RuntimeUpgradeRegistry::clear_chain(chain_id);
     }
