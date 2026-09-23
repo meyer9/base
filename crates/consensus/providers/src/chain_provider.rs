@@ -178,7 +178,7 @@ impl ChainProvider for AlloyChainProvider {
 
         self.header_by_hash_cache.put(hash, header.clone());
 
-        Metrics::cache_entries("header_by_hash").increment(1);
+        Metrics::cache_entries("header_by_hash").set(self.header_by_hash_cache.len() as f64);
 
         Ok(header)
     }
@@ -229,7 +229,7 @@ impl ChainProvider for AlloyChainProvider {
 
         self.receipts_by_hash_cache.put(hash, consensus_receipts.clone());
 
-        Metrics::cache_entries("receipts_by_hash").increment(1);
+        Metrics::cache_entries("receipts_by_hash").set(self.receipts_by_hash_cache.len() as f64);
 
         Ok(consensus_receipts)
     }
@@ -271,7 +271,8 @@ impl ChainProvider for AlloyChainProvider {
         self.block_info_and_transactions_by_hash_cache
             .put(hash, (block_info, block.body.transactions.clone()));
 
-        Metrics::cache_entries("block_info_and_tx").increment(1);
+        Metrics::cache_entries("block_info_and_tx")
+            .set(self.block_info_and_transactions_by_hash_cache.len() as f64);
 
         Ok((block_info, block.body.transactions))
     }
@@ -280,8 +281,92 @@ impl ChainProvider for AlloyChainProvider {
 #[cfg(test)]
 mod tests {
     use alloy_primitives::B256;
+    #[cfg(feature = "metrics")]
+    use alloy_consensus::Header;
+    #[cfg(feature = "metrics")]
+    use alloy_provider::RootProvider;
+    #[cfg(feature = "metrics")]
+    use alloy_rpc_types_eth::{Block as RpcBlock, Header as RpcHeader};
+    #[cfg(feature = "metrics")]
+    use httpmock::prelude::*;
+    #[cfg(feature = "metrics")]
+    use metrics_util::{
+        CompositeKey, MetricKind,
+        debugging::{DebugValue, DebuggingRecorder},
+    };
 
     use super::*;
+
+    #[cfg(feature = "metrics")]
+    type SnapshotEntry =
+        (CompositeKey, Option<metrics::Unit>, Option<metrics::SharedString>, DebugValue);
+
+    #[cfg(feature = "metrics")]
+    fn cache_entries_metric<'a>(
+        snapshot: &'a [SnapshotEntry],
+        cache: &str,
+    ) -> Option<&'a DebugValue> {
+        snapshot
+            .iter()
+            .find(|(key, _, _, _)| {
+                key.kind() == MetricKind::Gauge
+                    && key.key().name() == "base_providers.cache_entries"
+                    && key
+                        .key()
+                        .labels()
+                        .any(|label| label.key() == "cache" && label.value() == cache)
+            })
+            .map(|(_, _, _, value)| value)
+    }
+
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn cache_entry_gauge_tracks_lru_capacity() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime must build")
+                .block_on(async {
+                    let server = MockServer::start_async().await;
+                    let block = RpcBlock::empty(RpcHeader::new(Header::default()));
+                    server
+                        .mock_async(move |when, then| {
+                            when.method(POST)
+                                .path("/")
+                                .json_body_includes(r#"{"method":"eth_getBlockByHash"}"#);
+                            then.status(200)
+                                .header("content-type", "application/json")
+                                .json_body_obj(&serde_json::json!({
+                                    "jsonrpc": "2.0",
+                                    "id": 0,
+                                    "result": block,
+                                }));
+                        })
+                        .await;
+
+                    let url = server.url("/").parse().expect("mock URL must parse");
+                    let mut provider = AlloyChainProvider::new(RootProvider::new_http(url), 1);
+                    provider
+                        .header_by_hash(B256::with_last_byte(1))
+                        .await
+                        .expect("first header fetch must succeed");
+                    provider
+                        .header_by_hash(B256::with_last_byte(2))
+                        .await
+                        .expect("second header fetch must succeed");
+                });
+        });
+
+        let snapshot = snapshotter.snapshot().into_vec();
+        match cache_entries_metric(&snapshot, "header_by_hash") {
+            Some(DebugValue::Gauge(entries)) => assert_eq!(entries.into_inner(), 1.0),
+            metric => panic!("expected one cached header entry, got {metric:?}"),
+        }
+    }
 
     #[test]
     fn test_from_alloy_chain_provider_error() {

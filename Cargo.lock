@@ -4151,6 +4151,7 @@ dependencies = [
  "httpmock",
  "lru 0.16.4",
  "metrics",
+ "metrics-util",
  "reqwest 0.13.4",
  "serde",
  "serde_json",
