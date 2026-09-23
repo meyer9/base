@@ -260,7 +260,13 @@ where
                 break;
             }
 
-            if let Err(error) = self.process_once().await {
+            let result = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => break,
+                result = self.process_once() => result,
+            };
+
+            if let Err(error) = result {
                 L2BlockParityMetrics::fetch_errors_total(L2BlockParityMetrics::SCOPE_PASS)
                     .increment(1);
                 error!(error = %error, "derived L2 block parity pass failed");
@@ -446,7 +452,10 @@ mod tests {
         sync::Arc,
     };
 
-    use tokio::sync::Mutex;
+    use tokio::{
+        sync::{Mutex, Notify},
+        time::timeout,
+    };
 
     use super::*;
 
@@ -615,5 +624,50 @@ mod tests {
             .expect_err("zero max_blocks_per_tick should fail validation");
 
         assert!(err.to_string().contains("max_blocks_per_tick must be greater than 0"));
+    }
+
+    #[derive(Debug)]
+    struct BlockedL2BlockProvider {
+        started: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl L2BlockProvider for BlockedL2BlockProvider {
+        async fn unsafe_block_number(&self) -> eyre::Result<u64> {
+            self.started.notify_one();
+            std::future::pending().await
+        }
+
+        async fn safe_block_number(&self) -> eyre::Result<u64> {
+            unreachable!("the monitor must cancel the blocked unsafe-head request first")
+        }
+
+        async fn block_by_number(&self, _number: u64) -> eyre::Result<Option<L2BlockSnapshot>> {
+            unreachable!("the monitor must cancel the blocked unsafe-head request first")
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_interrupts_an_in_flight_parity_rpc() {
+        let started = Arc::new(Notify::new());
+        let monitor = L2BlockParityMonitor::new(
+            BlockedL2BlockProvider { started: Arc::clone(&started) },
+            BlockedL2BlockProvider { started: Arc::clone(&started) },
+            L2BlockParityMonitorConfig::new(1, Duration::from_secs(1)),
+        );
+        let cancellation = CancellationToken::new();
+        let task_cancellation = cancellation.clone();
+        let handle = tokio::spawn(async move {
+            let mut monitor = monitor;
+            monitor.run(task_cancellation).await;
+        });
+
+        started.notified().await;
+        cancellation.cancel();
+
+        timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("cancellation should interrupt the in-flight parity RPC")
+            .expect("parity monitor task should not panic");
     }
 }
