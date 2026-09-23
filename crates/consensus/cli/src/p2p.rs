@@ -202,7 +202,8 @@ pub struct P2PNetworkArgs {
         id = "consensus_p2p_discovery_interval",
         long = "p2p.discovery.interval",
         default_value = "5",
-        env = "BASE_NODE_P2P_DISCOVERY_INTERVAL"
+        env = "BASE_NODE_P2P_DISCOVERY_INTERVAL",
+        value_parser = clap::value_parser!(u64).range(1..)
     )]
     pub discovery_interval: u64,
     /// The directory to store the bootstore.
@@ -310,7 +311,11 @@ pub struct P2PNetworkArgs {
     /// service. By default, peers are not removed from the discovery service.
     ///
     /// This is useful for discovering a wider set of peers.
-    #[arg(long = "p2p.discovery.randomize", env = "BASE_NODE_P2P_DISCOVERY_RANDOMIZE")]
+    #[arg(
+        long = "p2p.discovery.randomize",
+        env = "BASE_NODE_P2P_DISCOVERY_RANDOMIZE",
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
     pub discovery_randomize: Option<u64>,
 }
 
@@ -874,6 +879,16 @@ mod tests {
         assert_eq!(args.p2p.discovery_randomize, Some(10));
         let args = MockCommand::parse_from(["test"]);
         assert_eq!(args.p2p.discovery_randomize, None);
+    }
+
+    #[test]
+    fn rejects_zero_discovery_intervals() {
+        for flag in ["--p2p.discovery.interval", "--p2p.discovery.randomize"] {
+            let error = MockCommand::try_parse_from(["test", flag, "0"])
+                .expect_err("zero discovery intervals must be rejected");
+
+            assert!(error.to_string().contains("1.."));
+        }
     }
 
     #[test]
