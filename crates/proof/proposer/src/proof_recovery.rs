@@ -3,7 +3,9 @@
 use std::sync::Arc;
 
 use alloy_primitives::Address;
-use base_proof_contracts::{AnchorStateRegistryClient, DisputeGameFactoryClient, game_lookup_key};
+use base_proof_contracts::{
+    AnchorSnapshot, AnchorStateRegistryClient, DisputeGameFactoryClient, game_lookup_key,
+};
 use base_proof_rpc::{RollupProvider, RpcError};
 use futures::{StreamExt, TryStreamExt, stream};
 use tracing::{debug, info, warn};
@@ -27,6 +29,8 @@ pub struct ProofRecoveryConfig {
 /// Cached result from the last successful recovery walk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProofRecoveryCache {
+    /// Anchor snapshot used to recover the cached state.
+    pub anchor_snapshot: AnchorSnapshot,
     /// Factory `game_count` at the time of the walk.
     pub game_count: u64,
     /// Recovered onchain state from the walk.
@@ -77,39 +81,8 @@ impl ProofRecovery {
         };
         let finalized_head = sync_status.finalized_l2.number;
 
-        if let Some(cached) = cache.as_ref() {
-            let block_interval = match self
-                .intervals
-                .for_starting_block(cached.state.l2_block_number)
-                .await
-            {
-                Ok(intervals) => intervals.block_interval,
-                Err(e) => {
-                    warn!(error = %e, "Failed to resolve proposal intervals, retrying next tick");
-                    return None;
-                }
-            };
-            let Some(next_proposal_block) =
-                ProofTarget::next_block(cached.state.l2_block_number, block_interval)
-            else {
-                warn!(
-                    cached_block = cached.state.l2_block_number,
-                    block_interval, "Cannot compute next proposal block, skipping recovery"
-                );
-                return None;
-            };
-
-            if finalized_head < next_proposal_block {
-                debug!(
-                    finalized_head,
-                    cached_block = cached.state.l2_block_number,
-                    next_proposal_block,
-                    "Finalized head below next proposal target, skipping recovery"
-                );
-                return Some((cached.state, finalized_head));
-            }
-        }
-
+        // Keep cache admission in `recover_latest_state`, where both L1 inputs
+        // that define the recovery cursor are checked against the cached walk.
         let state = match self.recover_latest_state(cache, finalized_head).await {
             Ok(s) => s,
             Err(e) => {
@@ -142,8 +115,9 @@ impl ProofRecovery {
             .await
             .map_err(|e| ProposerError::Contract(format!("anchor_snapshot failed: {e}")))?;
         let anchor = anchor_snapshot.anchor_root;
-        let usable_cache =
-            cache.as_ref().filter(|cached| anchor.l2_block_number <= cached.state.l2_block_number);
+        let usable_cache = cache
+            .as_ref()
+            .filter(|cached| cached.anchor_snapshot == anchor_snapshot);
 
         // Trust the cache only when no new games appeared AND finalized has not
         // advanced far enough to admit the next already-existing game. The walk
@@ -191,7 +165,7 @@ impl ProofRecovery {
 
         let state = self.forward_walk(&start, finalized_head).await?;
 
-        *cache = Some(ProofRecoveryCache { game_count: count, state });
+        *cache = Some(ProofRecoveryCache { anchor_snapshot, game_count: count, state });
         Ok(state)
     }
 
@@ -311,7 +285,7 @@ mod tests {
     use std::{collections::HashMap, sync::Arc};
 
     use alloy_primitives::{Address, B256};
-    use base_proof_contracts::AnchorRoot;
+    use base_proof_contracts::{AnchorRoot, AnchorSnapshot};
 
     use super::*;
     use crate::{
@@ -453,6 +427,10 @@ mod tests {
         l2_block_number: u64,
     ) -> Option<ProofRecoveryCache> {
         Some(ProofRecoveryCache {
+            anchor_snapshot: AnchorSnapshot {
+                anchor_root: test_anchor_root(TEST_ANCHOR_BLOCK),
+                anchor_game: Address::ZERO,
+            },
             game_count,
             state: RecoveredState { parent_address, output_root, l2_block_number },
         })
@@ -661,6 +639,40 @@ mod tests {
             "cursor advances when finalized rises, without any new game"
         );
         assert_eq!(state.parent_address, proxy_addr(3));
+    }
+
+    #[tokio::test]
+    async fn test_try_recover_reloads_when_anchor_changes_below_next_target() {
+        let recovery = recovery(MockDisputeGameFactory::default(), HashMap::new());
+        let mut cache = Some(ProofRecoveryCache {
+            anchor_snapshot: AnchorSnapshot {
+                anchor_root: AnchorRoot { root: B256::repeat_byte(0xdd), l2_block_number: 0 },
+                anchor_game: proxy_addr(99),
+            },
+            game_count: 0,
+            state: RecoveredState {
+                parent_address: proxy_addr(99),
+                output_root: B256::repeat_byte(0xdd),
+                l2_block_number: TEST_BLOCK_INTERVAL,
+            },
+        });
+
+        let (state, finalized_head) = recovery
+            .try_recover_and_plan(&mut cache)
+            .await
+            .expect("anchor changes must reload recovery state");
+
+        assert_eq!(finalized_head, 0);
+        assert_eq!(state.parent_address, Address::ZERO);
+        assert_eq!(state.output_root, B256::ZERO);
+        assert_eq!(state.l2_block_number, TEST_ANCHOR_BLOCK);
+        assert_eq!(
+            cache.expect("recovery must refresh the cache").anchor_snapshot,
+            AnchorSnapshot {
+                anchor_root: test_anchor_root(TEST_ANCHOR_BLOCK),
+                anchor_game: Address::ZERO,
+            }
+        );
     }
 
     #[tokio::test]
