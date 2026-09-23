@@ -33,7 +33,10 @@ struct RateLimiter {
 
 impl RateLimiter {
     fn new(max_rps: u32) -> Self {
-        Self { timestamps: VecDeque::with_capacity(max_rps as usize), max_rps }
+        // `max_rps` is operator configuration, not an expected allocation size.
+        // Starting empty avoids reserving up to 2^32 timestamps for a permissive
+        // rate limit; the deque grows only with sends made during one window.
+        Self { timestamps: VecDeque::new(), max_rps }
     }
 
     fn prune(&mut self, now: Instant) {
@@ -205,8 +208,13 @@ impl<R: ForwardRequest> DestinationForwarder<R> {
         ForwarderMetrics::queue_size(Arc::clone(&self.url_label)).set(self.receiver.len() as f64);
     }
 
+    /// Drains a closed destination queue without bypassing its configured rate limit.
     async fn flush_remaining(&mut self) {
         while !self.buffer.is_empty() {
+            if let Some(wait) = self.limiter.check_rate_limit() {
+                time::sleep(wait).await;
+                continue;
+            }
             self.flush_buffer().await;
         }
     }
@@ -580,6 +588,16 @@ mod tests {
         }
 
         assert!(limiter.check_rate_limit().is_some());
+    }
+
+    #[test]
+    fn rate_limiter_does_not_preallocate_for_permissive_operator_limits() {
+        let mut limiter = RateLimiter::new(u32::MAX);
+
+        limiter.record_send();
+
+        assert_eq!(limiter.timestamps.len(), 1);
+        assert!(limiter.timestamps.capacity() < 1024);
     }
 
     #[tokio::test]
