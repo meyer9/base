@@ -192,6 +192,15 @@ impl DerivationStateMachine {
         self.confirmed_safe_head
     }
 
+    /// Returns whether `safe_head` is the safe head already confirmed by the engine.
+    ///
+    /// Engine safe-head notifications may be delivered more than once. The L2 block hash is the
+    /// block identity, so a repeated notification must not acknowledge a newer payload that is
+    /// still awaiting confirmation.
+    pub fn is_confirmed_safe_head(&self, safe_head: &L2BlockInfo) -> bool {
+        self.confirmed_safe_head.block_info.hash == safe_head.block_info.hash
+    }
+
     /// Applies the provided  [`DerivationStateUpdate`], returning an
     /// [`DerivationStateTransitionError`] if the state transition was invalid.
     pub fn update(
@@ -199,9 +208,10 @@ impl DerivationStateMachine {
         state_update: &DerivationStateUpdate,
     ) -> Result<(), DerivationStateTransitionError> {
         if let DerivationStateUpdate::NewAttributesConfirmed(safe_head) = state_update
-            && safe_head.block_info.hash == self.confirmed_safe_head.block_info.hash
+            && self.is_confirmed_safe_head(safe_head)
         {
             info!(target: "derivation", ?safe_head, "Re-received safe head. Skipping state transition.");
+            return Ok(());
         }
 
         debug!(target: "derivation", state=?self.state, ?state_update, "Executing derivation state update.");
@@ -367,6 +377,32 @@ mod tests {
 
         assert_eq!(machine.current_state(), Deriving);
         assert_eq!(machine.last_confirmed_safe_head(), safe_head);
+    }
+
+    #[test]
+    fn duplicate_safe_head_does_not_acknowledge_newer_attributes() {
+        let mut machine = DerivationStateMachine::new();
+        let initial_safe_head = dummy_l2_block_info();
+        let confirmed_safe_head = L2BlockInfo {
+            block_info: BlockInfo {
+                hash: b256!("0000000000000000000000000000000000000000000000000000000000000002"),
+                number: 2,
+                parent_hash: initial_safe_head.block_info.hash,
+                timestamp: 1,
+            },
+            l1_origin: initial_safe_head.l1_origin,
+            seq_num: 1,
+        };
+
+        machine.update(&ELSyncCompleted(Box::new(initial_safe_head))).unwrap();
+        machine.update(&NewAttributesDerived(attrs())).unwrap();
+        machine.update(&NewAttributesConfirmed(Box::new(confirmed_safe_head))).unwrap();
+        machine.update(&NewAttributesDerived(attrs())).unwrap();
+
+        machine.update(&NewAttributesConfirmed(Box::new(confirmed_safe_head))).unwrap();
+
+        assert_eq!(machine.current_state(), AwaitingSafeHeadConfirmation);
+        assert_eq!(machine.last_confirmed_safe_head(), confirmed_safe_head);
     }
 
     #[test]
