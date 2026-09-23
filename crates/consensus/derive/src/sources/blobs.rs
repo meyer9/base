@@ -71,7 +71,7 @@ where
             if to != self.batcher_address {
                 continue;
             }
-            if tx.recover_signer().unwrap_or_default() != batcher_address {
+            if tx.recover_signer().ok() != Some(batcher_address) {
                 continue;
             }
             if tx.tx_type() != TxType::Eip4844 {
@@ -234,8 +234,8 @@ where
 pub(super) mod tests {
     use alloc::vec;
 
-    use alloy_consensus::{Blob, Signed, TxEip4844, TxEip4844Variant};
-    use alloy_primitives::Signature;
+    use alloy_consensus::{Blob, Signed, TxEip4844, TxEip4844Variant, TxLegacy};
+    use alloy_primitives::{Bytes, Signature, TxKind, U256};
     use base_common_chains::ChainConfig;
 
     use super::*;
@@ -253,6 +253,14 @@ pub(super) mod tests {
 
     fn valid_blob_batcher_address() -> Address {
         valid_blob_txs().into_iter().next().unwrap().recover_signer().unwrap()
+    }
+
+    fn invalid_legacy_tx(to: Address, input: Bytes) -> TxEnvelope {
+        TxEnvelope::Legacy(Signed::new_unchecked(
+            TxLegacy { to: TxKind::Call(to), input, ..Default::default() },
+            Signature::new(U256::ZERO, U256::ZERO, false),
+            Default::default(),
+        ))
     }
 
     pub(crate) fn valid_blob_txs() -> Vec<TxEnvelope> {
@@ -310,6 +318,26 @@ pub(super) mod tests {
         assert!(source.load_blobs(&BlockInfo::default(), Address::ZERO).await.is_ok());
         assert!(source.data.is_empty());
         assert!(source.open);
+    }
+
+    #[tokio::test]
+    async fn invalid_signature_is_not_accepted_for_zero_batcher() {
+        let mut source = default_test_blob_source();
+        let block_info = BlockInfo::default();
+        let batch_inbox_address = ChainConfig::MAINNET.batch_inbox_address;
+        source.batcher_address = batch_inbox_address;
+        source.chain_provider.insert_block_with_transactions(
+            1,
+            block_info,
+            vec![invalid_legacy_tx(batch_inbox_address, Bytes::from_static(b"forged"))],
+        );
+
+        let error = source.next(&block_info, Address::ZERO).await.unwrap_err();
+
+        assert!(
+            matches!(error, PipelineErrorKind::Temporary(PipelineError::Eof)),
+            "transactions with unrecoverable signatures must not be treated as zero-address batcher transactions"
+        );
     }
 
     #[tokio::test]
