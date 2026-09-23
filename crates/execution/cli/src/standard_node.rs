@@ -39,7 +39,6 @@ use base_txpool_tracing::{TxPoolExtension, TxpoolConfig};
 use base_upgrade_signal::{
     UpgradeSignalMetricLayer, UpgradeSignalMetrics, UpgradeSignalStartupMode,
 };
-use tracing::warn;
 use url::Url;
 
 use crate::upgrade_signal::{
@@ -62,30 +61,6 @@ pub struct MeteringArgs {
     /// (e.g., "SSTORE,SLOAD,KECCAK256"). Precompile gas is always tracked.
     #[arg(long = "metering.metered-opcodes", requires = "enable_metering", value_delimiter = ',')]
     pub metering_metered_opcodes: Vec<String>,
-
-    /// Deprecated and ignored. Kept so older deployment configurations remain accepted.
-    #[arg(long = "metering.gas-limit", requires = "enable_metering", hide = true)]
-    pub metering_gas_limit: Option<u64>,
-
-    /// Deprecated and ignored. Kept so older deployment configurations remain accepted.
-    #[arg(long = "metering.execution-time-us", requires = "enable_metering", hide = true)]
-    pub metering_execution_time_us: Option<u64>,
-
-    /// Deprecated and ignored. Kept so older deployment configurations remain accepted.
-    #[arg(long = "metering.state-root-time-us", requires = "enable_metering", hide = true)]
-    pub metering_state_root_time_us: Option<u64>,
-
-    /// Deprecated and ignored. Kept so older deployment configurations remain accepted.
-    #[arg(long = "metering.da-bytes", requires = "enable_metering", hide = true)]
-    pub metering_da_bytes: Option<u64>,
-
-    /// Deprecated and ignored. Kept so older deployment configurations remain accepted.
-    #[arg(
-        long = "metering.target-flashblocks-per-block",
-        requires = "enable_metering",
-        hide = true
-    )]
-    pub metering_target_flashblocks_per_block: Option<usize>,
 
     /// Resource-unit schedule used to throttle transactions in the native
     /// payload builder.
@@ -742,15 +717,6 @@ impl StandardBaseRethNode {
             transaction_event_node_role: transaction_event_node_role(),
             flashblocks_config: flashblocks_config.clone(),
         });
-
-        if args.metering.metering_execution_time_us.is_some()
-            || args.metering.metering_state_root_time_us.is_some()
-            || args.metering.metering_gas_limit.is_some()
-            || args.metering.metering_da_bytes.is_some()
-            || args.metering.metering_target_flashblocks_per_block.is_some()
-        {
-            warn!("deprecated metering resource limit flags are ignored");
-        }
 
         let metering_config = if args.metering.enable_metering {
             let opcode_names = inspector_opcode_names(
@@ -1528,38 +1494,24 @@ mod tests {
     }
 
     #[test]
-    fn test_standard_node_args_accepts_deprecated_metering_flags() {
-        let args = CommandParser::<StandardNodeArgs>::parse_from([
-            "reth",
-            "--enable-metering",
+    fn deprecated_metering_resource_limit_flags_are_rejected() {
+        for flag in [
             "--metering.execution-time-us",
-            "5000000",
             "--metering.state-root-time-us",
-            "1000000",
             "--metering.gas-limit",
-            "30000000",
             "--metering.da-bytes",
-            "1572860",
             "--metering.target-flashblocks-per-block",
-            "4",
-        ])
-        .args;
+        ] {
+            let error = CommandParser::<StandardNodeArgs>::try_parse_from([
+                "reth",
+                "--enable-metering",
+                flag,
+                "1",
+            ])
+            .expect_err("removed resource limit flags must be rejected");
 
-        assert_eq!(args.metering.metering_execution_time_us, Some(5_000_000));
-        assert_eq!(args.metering.metering_state_root_time_us, Some(1_000_000));
-        assert_eq!(args.metering.metering_gas_limit, Some(30_000_000));
-        assert_eq!(args.metering.metering_da_bytes, Some(1_572_860));
-        assert_eq!(args.metering.metering_target_flashblocks_per_block, Some(4));
-        assert!(args.metering.resource_metering.resource_metering_schedule.is_none());
-
-        let config = ResourceMeteringConfig::from_parts(
-            args.metering.enable_metering,
-            args.metering.resource_metering.resource_metering_schedule.as_deref(),
-            Arc::new(NoopMeteringProvider),
-        )
-        .expect("enable-metering without a schedule must still boot");
-        assert!(config.enabled);
-        assert!(!config.is_active());
+            assert!(error.to_string().contains(flag));
+        }
     }
 
     #[test]
