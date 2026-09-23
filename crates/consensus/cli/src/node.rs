@@ -358,6 +358,21 @@ impl ConsensusNodeArgs {
         Ok(config)
     }
 
+    /// Rejects safe-head tracking for an isolated sequencer.
+    ///
+    /// Isolated sequencers do not run derivation, which is the only writer for SafeDB mappings.
+    /// Accepting this path would therefore expose stale mappings from an earlier node run or a
+    /// permanently empty database through the safe-head RPC.
+    pub fn validate_isolated_sequencer_config(&self) -> eyre::Result<()> {
+        if self.config.node_mode.is_sequencer()
+            && self.config.sequencer_flags.isolated
+            && self.config.safedb_path.is_some()
+        {
+            eyre::bail!("isolated sequencer does not support --safedb.path");
+        }
+        Ok(())
+    }
+
     /// Validates the signing-key requirements for the configured sequencer mode.
     pub fn validate_sequencer_key(&self) -> eyre::Result<()> {
         if self.config.node_mode.is_sequencer() {
@@ -455,6 +470,7 @@ impl ConsensusNodeArgs {
         overrides: ConsensusNodeOverrides,
         startup_mode: UpgradeSignalStartupMode,
     ) -> eyre::Result<RollupNode> {
+        self.validate_isolated_sequencer_config()?;
         self.validate_sequencer_key()?;
         self.validate_shadow_funding()?;
         self.validate_da_batcher_sender_override()?;
@@ -1010,6 +1026,29 @@ mod tests {
         );
 
         assert!(args.validate_sequencer_key().is_ok());
+    }
+
+    #[tokio::test]
+    async fn isolated_sequencer_rejects_safe_head_tracking() {
+        let args = ConsensusNodeArgs::new(
+            ConsensusChainArgs { l2_chain_id: Chain::from(8453_u64) },
+            ConsensusNodeConfigArgs {
+                node_mode: NodeMode::Sequencer,
+                sequencer_flags: SequencerArgs { isolated: true, ..SequencerArgs::default() },
+                safedb_path: Some(PathBuf::from("safe-head.redb")),
+                ..default_node_config_args()
+            },
+        );
+
+        let error = args
+            .build_rollup_node_with_overrides(
+                RollupConfig::default(),
+                ConsensusNodeOverrides::default(),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "isolated sequencer does not support --safedb.path");
     }
 
     #[rstest]
