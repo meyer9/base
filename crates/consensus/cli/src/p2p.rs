@@ -660,17 +660,21 @@ impl P2PArgs {
             Some(port) => port,
         };
 
-        let keypair = self.keypair().unwrap_or_else(|e| {
-            let generated = Keypair::generate_secp256k1();
-            warn!(
-                target: "p2p::config",
-                error = %e,
-                peer_id = %generated.public().to_peer_id(),
-                "Failed to load P2P keypair from configuration, generated ephemeral keypair. \
-                 Set --p2p.priv.path or --p2p.priv.raw for a persistent peer ID."
-            );
-            generated
-        });
+        let keypair = match self.keypair() {
+            Ok(keypair) => keypair,
+            Err(error) if self.private_key.is_none() && self.priv_path.is_none() => {
+                let generated = Keypair::generate_secp256k1();
+                warn!(
+                    target: "p2p::config",
+                    error = %error,
+                    peer_id = %generated.public().to_peer_id(),
+                    "No P2P keypair configured, generated ephemeral keypair. \
+                     Set --p2p.priv.path or --p2p.priv.raw for a persistent peer ID."
+                );
+                generated
+            }
+            Err(error) => return Err(error.into()),
+        };
         let secp256k1_key = keypair.clone().try_into_secp256k1()
             .map_err(|e| eyre::eyre!("Impossible to convert keypair to secp256k1. This is a bug since we only support secp256k1 keys: {e}"))?
             .secret().to_bytes();
@@ -1304,6 +1308,20 @@ mod tests {
             .to_string();
 
         assert!(err.contains("Failed to parse bootnode 'enr:invalid'"));
+    }
+
+    #[tokio::test]
+    async fn test_p2p_config_rejects_invalid_configured_private_key() {
+        let args = MockCommand::parse_from([
+            "test",
+            "--p2p.priv.raw",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        ]);
+
+        args.p2p
+            .config(&RollupConfig::default(), 8453, None, L1_RPC_TIMEOUT, Some(Address::ZERO))
+            .await
+            .expect_err("configured invalid P2P key should not fall back to a new identity");
     }
 
     #[tokio::test]
