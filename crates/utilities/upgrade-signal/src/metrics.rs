@@ -86,8 +86,21 @@ impl UpgradeSignalMetrics {
     /// Records all metrics derived from a successfully read schedule.
     pub fn record_schedule(layer: UpgradeSignalMetricLayer, schedule: &UpgradeSignalSchedule) {
         Self::init();
-        for signal in &schedule.signals {
-            Self::record_signal(layer, schedule.l1_block_number, signal);
+        for upgrade_id in BaseUpgrade::CONTRACT_VARIANTS {
+            let signal = schedule.signals.iter().find(|signal| signal.upgrade_id == upgrade_id);
+            let layer = layer.label();
+            let upgrade_id = upgrade_id.contract_id().to_string();
+
+            // A contract schedule is authoritative as a whole. Reset entries absent from a later
+            // read so operators do not keep seeing a removed upgrade's old activation and minimum
+            // protocol version after an L1 reorg or governance clear.
+            let (activation_timestamp, protocol_version) = signal
+                .map(|signal| (signal.activation_timestamp, signal.protocol_version))
+                .unwrap_or_default();
+            Self::activation_timestamp(layer, upgrade_id.clone()).set(activation_timestamp as f64);
+            Self::expected_protocol_version(layer, upgrade_id.clone())
+                .set(Self::protocol_version_to_f64(protocol_version));
+            Self::last_l1_read_block(layer, upgrade_id).set(schedule.l1_block_number as f64);
         }
     }
 
@@ -270,5 +283,57 @@ mod tests {
 
         UpgradeSignalMetrics::record_apply_failure(UpgradeSignalMetricLayer::Consensus, &schedule);
         UpgradeSignalMetrics::record_apply_success(UpgradeSignalMetricLayer::Consensus, &schedule);
+    }
+
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn schedule_shrink_clears_removed_upgrade_metrics() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::with_local_recorder(&recorder, || {
+            UpgradeSignalMetrics::record_schedule(
+                UpgradeSignalMetricLayer::Consensus,
+                &UpgradeSignalSchedule::new(
+                    1,
+                    vec![UpgradeSignal {
+                        upgrade_id: BaseUpgrade::Azul,
+                        activation_timestamp: 42,
+                        protocol_version: U256::from(7),
+                    }],
+                ),
+            );
+            UpgradeSignalMetrics::record_schedule(
+                UpgradeSignalMetricLayer::Consensus,
+                &UpgradeSignalSchedule::new(2, Vec::new()),
+            );
+        });
+
+        let snapshot = snapshotter.snapshot().into_vec();
+        let metric_value = |name| {
+            snapshot
+                .iter()
+                .find(|(key, _, _, _)| {
+                    key.key().name() == name
+                        && key
+                            .key()
+                            .labels()
+                            .any(|label| label.key() == "upgrade" && label.value() == "azul")
+                })
+                .map(|(_, _, _, value)| value)
+                .unwrap()
+        };
+
+        assert_eq!(
+            metric_value("base.upgrade_signal.activation_timestamp"),
+            &DebugValue::Gauge(0.0.into())
+        );
+        assert_eq!(
+            metric_value("base.upgrade_signal.expected_protocol_version"),
+            &DebugValue::Gauge(0.0.into())
+        );
+        assert_eq!(
+            metric_value("base.upgrade_signal.last_l1_read_block"),
+            &DebugValue::Gauge(2.0.into())
+        );
     }
 }

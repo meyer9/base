@@ -130,6 +130,14 @@ impl UpgradeSignalState {
         self.observed = Some(signal);
         update
     }
+
+    /// Removes an upgrade omitted from the authoritative schedule.
+    fn clear_signal(&mut self) -> UpgradeSignalStateUpdate {
+        match self.observed.take() {
+            Some(_) => UpgradeSignalStateUpdate::Changed,
+            None => UpgradeSignalStateUpdate::Unchanged,
+        }
+    }
 }
 
 /// Outcome of a single live poll, telling the caller whether the node must fail closed.
@@ -423,26 +431,34 @@ impl UpgradeSignalMonitor {
             .collect()
     }
 
-    /// Applies signals read from L1 and records corresponding live metrics.
+    /// Records one authoritative schedule and updates the observed signal baselines.
     fn update_schedule(
         &mut self,
         schedule: UpgradeSignalSchedule,
     ) -> Vec<UpgradeSignalStateUpdate> {
-        schedule
-            .signals
-            .into_iter()
-            .map(|signal| self.update_signal(schedule.l1_block_number, signal))
-            .collect()
+        UpgradeSignalMetrics::record_schedule(self.metrics_layer, &schedule);
+
+        let mut updates: Vec<_> =
+            schedule.signals.iter().cloned().map(|signal| self.update_signal(signal)).collect();
+
+        for upgrade_id in BaseUpgrade::CONTRACT_VARIANTS {
+            if schedule.signals.iter().any(|signal| signal.upgrade_id == upgrade_id) {
+                continue;
+            }
+
+            let update = self.states.entry(upgrade_id).or_default().clear_signal();
+            if matches!(update, UpgradeSignalStateUpdate::Changed) {
+                UpgradeSignalMetrics::record_signal_update(self.metrics_layer, upgrade_id);
+                updates.push(update);
+            }
+        }
+
+        updates
     }
 
-    /// Applies one signal read from L1 and records corresponding live metrics.
-    fn update_signal(
-        &mut self,
-        l1_block_number: u64,
-        signal: UpgradeSignal,
-    ) -> UpgradeSignalStateUpdate {
+    /// Updates one observed signal and records a value-change metric when needed.
+    fn update_signal(&mut self, signal: UpgradeSignal) -> UpgradeSignalStateUpdate {
         let upgrade_id = signal.upgrade_id;
-        UpgradeSignalMetrics::record_signal(self.metrics_layer, l1_block_number, &signal);
 
         let update = self.states.entry(upgrade_id).or_default().update_signal(signal);
         if matches!(update, UpgradeSignalStateUpdate::Changed) {
@@ -571,6 +587,23 @@ mod tests {
         monitor.update_schedule(schedule(10));
 
         assert_eq!(monitor.update_schedule(schedule(12)), vec![UpgradeSignalStateUpdate::Changed]);
+    }
+
+    #[test]
+    fn monitor_forgets_an_upgrade_omitted_from_a_later_schedule() {
+        let mut monitor = monitor();
+        let initial = schedule(10);
+
+        monitor.update_schedule(initial);
+
+        assert_eq!(
+            monitor.update_schedule(UpgradeSignalSchedule::new(2, Vec::new())),
+            vec![UpgradeSignalStateUpdate::Changed]
+        );
+        assert_eq!(
+            monitor.update_schedule(schedule(10)),
+            vec![UpgradeSignalStateUpdate::Initialized]
+        );
     }
 
     #[test]
