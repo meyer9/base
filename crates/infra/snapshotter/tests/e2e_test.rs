@@ -5,10 +5,7 @@ use std::{
     io::{Read, Write},
     num::NonZeroUsize,
     path::{Path, PathBuf},
-    sync::{
-        Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::Mutex,
 };
 
 use anyhow::Result;
@@ -54,9 +51,7 @@ const fn upload_params<'a>(
 }
 
 struct MockContainerManager {
-    running: AtomicBool,
-    stop_called: AtomicBool,
-    start_called: AtomicBool,
+    running_containers: Mutex<HashMap<String, bool>>,
     stopped_containers: Mutex<Vec<String>>,
     started_containers: Mutex<Vec<String>>,
 }
@@ -64,20 +59,25 @@ struct MockContainerManager {
 impl MockContainerManager {
     const fn new() -> Self {
         Self {
-            running: AtomicBool::new(true),
-            stop_called: AtomicBool::new(false),
-            start_called: AtomicBool::new(false),
+            running_containers: Mutex::new(HashMap::new()),
             stopped_containers: Mutex::new(Vec::new()),
             started_containers: Mutex::new(Vec::new()),
         }
     }
 
     fn was_stopped(&self) -> bool {
-        self.stop_called.load(Ordering::Relaxed)
+        !self.stopped_containers.lock().expect("lock should not be poisoned").is_empty()
     }
 
     fn was_started(&self) -> bool {
-        self.start_called.load(Ordering::Relaxed)
+        !self.started_containers.lock().expect("lock should not be poisoned").is_empty()
+    }
+
+    fn set_running(&self, container_name: &str, running: bool) {
+        self.running_containers
+            .lock()
+            .expect("lock should not be poisoned")
+            .insert(container_name.to_string(), running);
     }
 
     fn stopped_container(&self, container_name: &str) -> bool {
@@ -108,8 +108,7 @@ impl MockContainerManager {
 #[async_trait]
 impl ContainerManager for MockContainerManager {
     async fn stop(&self, container_name: &str) -> Result<()> {
-        self.running.store(false, Ordering::Relaxed);
-        self.stop_called.store(true, Ordering::Relaxed);
+        self.set_running(container_name, false);
         self.stopped_containers
             .lock()
             .expect("lock should not be poisoned")
@@ -118,8 +117,7 @@ impl ContainerManager for MockContainerManager {
     }
 
     async fn start(&self, container_name: &str) -> Result<()> {
-        self.running.store(true, Ordering::Relaxed);
-        self.start_called.store(true, Ordering::Relaxed);
+        self.set_running(container_name, true);
         self.started_containers
             .lock()
             .expect("lock should not be poisoned")
@@ -127,8 +125,13 @@ impl ContainerManager for MockContainerManager {
         Ok(())
     }
 
-    async fn is_running(&self, _container_name: &str) -> Result<bool> {
-        Ok(self.running.load(Ordering::Relaxed))
+    async fn is_running(&self, container_name: &str) -> Result<bool> {
+        Ok(*self
+            .running_containers
+            .lock()
+            .expect("lock should not be poisoned")
+            .get(container_name)
+            .unwrap_or(&true))
     }
 }
 
@@ -1541,6 +1544,50 @@ async fn orchestrator_skips_cl_when_consensus_container_name_is_none() -> Result
         manager.started_container_names(),
         ["fake-el"],
         "unified snapshot should start only the EL container"
+    );
+
+    Ok(())
+}
+
+/// An operator may intentionally leave the CL stopped while taking an EL snapshot.
+/// The snapshotter must not silently bring that CL back online during cleanup.
+#[tokio::test]
+#[serial]
+async fn orchestrator_preserves_an_already_stopped_consensus_container() -> Result<()> {
+    let harness = TestHarness::new().await?;
+    let manager = std::sync::Arc::new(MockContainerManager::new());
+    manager.set_running("fake-cl", false);
+    let uploader = SnapshotUploader::new(
+        harness.storage_client.clone(),
+        harness.bucket_name.clone(),
+        "test".to_string(),
+        None,
+    );
+
+    let tmp = tempfile::tempdir()?;
+    let config = test_config(&harness.bucket_name, tmp.path());
+    let snapshotter = base_snapshotter::Snapshotter::new(
+        std::sync::Arc::clone(&manager),
+        MockTipChecker::new(true),
+        uploader,
+        config,
+    );
+
+    let result = snapshotter.run().await;
+    assert!(result.is_err(), "missing snapshot data should still fail the run");
+    assert_eq!(
+        manager.stopped_container_names(),
+        ["fake-el"],
+        "snapshotting must not stop a CL that was already stopped"
+    );
+    assert_eq!(
+        manager.started_container_names(),
+        ["fake-el"],
+        "snapshot cleanup must not start a CL that was already stopped"
+    );
+    assert!(
+        !manager.is_running("fake-cl").await?,
+        "the CL must remain in the operator-selected stopped state"
     );
 
     Ok(())

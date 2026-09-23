@@ -17,8 +17,10 @@ use crate::{
 /// upload → restart EL, then optionally restart CL.
 ///
 /// The EL is always restarted, even if snapshot generation or upload fails. When a
-/// CL container is configured, it is stopped first and restarted last so it can
-/// reconnect to the EL. This prevents leaving the node in a stopped state on errors.
+/// configured CL container is running, it is stopped first and restarted last so it can
+/// reconnect to the EL. A CL that was already stopped is left stopped. This prevents
+/// leaving a running node in a stopped state on errors without overriding an operator's
+/// intentional stopped state.
 pub struct Snapshotter<C: ContainerManager, T: TipChecker> {
     container_manager: C,
     tip_checker: T,
@@ -47,12 +49,13 @@ impl<C: ContainerManager, T: TipChecker> Snapshotter<C, T> {
     /// Executes the full snapshot lifecycle.
     ///
     /// 0. Captures the EL's latest block and verifies it is at chain tip; skips the run if it is not
-    /// 1. Stops the CL (when configured) then the EL
+    /// 1. Stops a running CL (when configured) then the EL
     /// 2. Verifies stopped containers are no longer running
     /// 3. Generates snapshot archives
     /// 4. Uploads to S3/R2
     /// 5. Clears reth's persisted peer list (best effort)
-    /// 6. Restarts the EL and then the CL when configured (always, even on failure)
+    /// 6. Restarts the EL and then a CL that was running when the snapshot began (always, even
+    ///    on failure)
     pub async fn run(&self) -> Result<()> {
         // Only snapshot when the EL is caught up to tip. Snapshotting a lagging
         // node would publish stale data and pause a node that is still syncing.
@@ -75,10 +78,28 @@ impl<C: ContainerManager, T: TipChecker> Snapshotter<C, T> {
             return Ok(());
         }
 
-        // Stop the dependent CL first when configured, then the EL. Restarting
-        // in the reverse order below ensures the EL is available when the CL
-        // reconnects.
-        let cl_stop_result = if let Some(ref cl_name) = self.config.consensus_container_name {
+        // A configured CL can intentionally be stopped for maintenance. Preserve
+        // that operator-owned state instead of bringing it online after this
+        // snapshot run. A running CL is stopped first, then restarted after the
+        // EL so it can reconnect to an available execution endpoint.
+        let cl_name = self.config.consensus_container_name.as_deref();
+        let cl_was_running = match cl_name {
+            Some(cl_name) => self
+                .container_manager
+                .is_running(cl_name)
+                .await
+                .with_context(|| format!("failed to inspect CL container {cl_name}"))?,
+            None => false,
+        };
+        if let Some(cl_name) = cl_name
+            && !cl_was_running
+        {
+            info!(container = %cl_name, "CL container is already stopped; leaving it stopped");
+        }
+
+        // Stop the dependent, running CL first, then the EL. Restarting in the
+        // reverse order below ensures the EL is available when the CL reconnects.
+        let cl_stop_result = if let Some(cl_name) = cl_name.filter(|_| cl_was_running) {
             self.container_manager.stop(cl_name).await
         } else {
             Ok(())
@@ -107,7 +128,7 @@ impl<C: ContainerManager, T: TipChecker> Snapshotter<C, T> {
             );
         }
 
-        let cl_restart_result = if let Some(ref cl_name) = self.config.consensus_container_name {
+        let cl_restart_result = if let Some(cl_name) = cl_name.filter(|_| cl_was_running) {
             let cl_restart_result = self.container_manager.start(cl_name).await;
             if let Err(ref restart_err) = cl_restart_result {
                 error!(
