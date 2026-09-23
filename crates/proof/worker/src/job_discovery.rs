@@ -355,6 +355,19 @@ where
             }
         }
 
+        let cancelled_proof_tasks = proof_tasks.len();
+        if cancelled_proof_tasks > 0 {
+            info!(
+                worker_id = %self.config.worker_id,
+                worker_kind = self.config.claim_filter.log_label(),
+                cancelled_proof_tasks,
+                "cancelling claimed proof generation during shutdown"
+            );
+            // A generator can be blocked indefinitely in a backend RPC. Its claim lease recovers
+            // server-side, so do not let an unresponsive backend prevent the host from stopping.
+            proof_tasks.abort_all();
+        }
+
         self.proof_generator.shutdown();
         tokio::join!(
             async {
@@ -484,7 +497,13 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::{
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
 
     use async_trait::async_trait;
     use base_prover_service_protocol::{
@@ -494,7 +513,7 @@ mod tests {
         WorkerSubmitProofRequest, WorkerSubmitProofResponse, ZkProofRequest,
     };
     use chrono::Utc;
-    use tokio::time::timeout;
+    use tokio::{sync::Notify, time::timeout};
 
     use super::*;
 
@@ -592,6 +611,21 @@ mod tests {
         can_claim: bool,
     }
 
+    #[derive(Debug)]
+    struct HangingGenerator {
+        started: Arc<Notify>,
+        shutdown_calls: Arc<AtomicUsize>,
+    }
+
+    impl HangingGenerator {
+        fn new() -> Self {
+            Self {
+                started: Arc::new(Notify::new()),
+                shutdown_calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
     #[async_trait]
     impl ClaimedProofJobHandler for MockGenerator {
         type Error = std::convert::Infallible;
@@ -606,6 +640,20 @@ mod tests {
                 .expect("generated jobs lock should not be poisoned")
                 .push(job.session_id);
             Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl ClaimedProofJobHandler for HangingGenerator {
+        type Error = std::convert::Infallible;
+
+        async fn handle_claimed_job(&self, _job: ProofJob) -> Result<(), Self::Error> {
+            self.started.notify_one();
+            std::future::pending().await
+        }
+
+        fn shutdown(&self) {
+            self.shutdown_calls.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -802,6 +850,31 @@ mod tests {
             *generated.lock().expect("generated jobs lock should not be poisoned"),
             vec!["session-1".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn cancellation_stops_host_when_claimed_generation_is_unresponsive() {
+        let client = MockWorkerClient::new(Some(compressed_job()));
+        let generator = Arc::new(HangingGenerator::new());
+        let started_notify = Arc::clone(&generator.started);
+        let started = started_notify.notified();
+        let shutdown_calls = Arc::clone(&generator.shutdown_calls);
+        let discovery = JobDiscovery::new(
+            client,
+            generator,
+            JobDiscoveryConfig::zk("worker-a", vec![ZkVm::Sp1], vec![ZkBackend::Cluster]),
+        );
+        let cancel = CancellationToken::new();
+        let run = tokio::spawn(discovery.run_until_cancelled(cancel.clone()));
+
+        started.await;
+        cancel.cancel();
+
+        timeout(Duration::from_secs(1), run)
+            .await
+            .expect("host should stop after cancellation")
+            .expect("host task should not panic");
+        assert_eq!(shutdown_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
