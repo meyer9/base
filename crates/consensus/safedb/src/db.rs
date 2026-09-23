@@ -139,7 +139,7 @@ impl SafeHeadListener for SafeDB {
 
         tokio::task::spawn_blocking(move || -> Result<(), SafeDBError> {
             let txn = db.begin_write().map_err(|e| SafeDBError::Database(e.to_string()))?;
-            let (entries_deleted, was_noop) = {
+            let entries_deleted = {
                 let mut table =
                     txn.open_table(SAFE_HEADS).map_err(|e| SafeDBError::Database(e.to_string()))?;
 
@@ -163,42 +163,36 @@ impl SafeHeadListener for SafeDB {
                     }
                 }
 
-                match first_key {
-                    Some(fk) => {
-                        // Collect only the u64 keys to delete (8 bytes each, not the full
-                        // 72-byte values) from first_key onward.
-                        let keys_to_delete: Vec<u64> = table
-                            .range(fk..)
-                            .map_err(|e| SafeDBError::Database(e.to_string()))?
-                            .map(|e| {
-                                e.map(|e| e.0.value())
-                                    .map_err(|e| SafeDBError::Database(e.to_string()))
-                            })
-                            .collect::<Result<_, _>>()?;
-                        let deleted = keys_to_delete.len();
-                        for key in keys_to_delete {
-                            table.remove(key).map_err(|e| SafeDBError::Database(e.to_string()))?;
-                        }
-
-                        // Re-anchor at the reset's stated L1 origin (not fk, which may be
-                        // a later L1 block when the reset origin falls in a gap between entries).
-                        let value = Self::encode_value(
-                            reset_safe_head.l1_origin.hash,
-                            reset_safe_head.block_info.hash,
-                            reset_safe_head.block_info.number,
-                        );
-                        table
-                            .insert(reset_safe_head.l1_origin.number, &value)
-                            .map_err(|e| SafeDBError::Database(e.to_string()))?;
-                        (deleted, false)
-                    }
-                    None => {
-                        // Every entry in the range `[reset_origin..]` has an L2 number
-                        // *below* the reset target, meaning there is nothing to truncate.
-                        // Note: entries before `reset_origin` are unaffected regardless.
-                        (0, true)
-                    }
+                let keys_to_delete = match first_key {
+                    Some(first_key) => table
+                        .range(first_key..)
+                        .map_err(|e| SafeDBError::Database(e.to_string()))?
+                        .map(|entry| {
+                            entry
+                                .map(|entry| entry.0.value())
+                                .map_err(|e| SafeDBError::Database(e.to_string()))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                    None => Vec::new(),
+                };
+                let entries_deleted = keys_to_delete.len();
+                for key in keys_to_delete {
+                    table.remove(key).map_err(|e| SafeDBError::Database(e.to_string()))?;
                 }
+
+                // Persist the reset head even when no entries were truncated. In particular,
+                // EL sync can advance beyond the latest derived mapping; without this anchor,
+                // reads at the reset origin return an older mapping (or NotFound).
+                let value = Self::encode_value(
+                    reset_safe_head.l1_origin.hash,
+                    reset_safe_head.block_info.hash,
+                    reset_safe_head.block_info.number,
+                );
+                table
+                    .insert(reset_safe_head.l1_origin.number, &value)
+                    .map_err(|e| SafeDBError::Database(e.to_string()))?;
+
+                entries_deleted
             };
             txn.commit().map_err(|e| SafeDBError::Database(e.to_string()))?;
 
@@ -207,7 +201,6 @@ impl SafeHeadListener for SafeDB {
                 l2_number = reset_safe_head.block_info.number,
                 l2_hash = %reset_safe_head.block_info.hash,
                 entries_deleted,
-                was_noop,
                 "reset safe head",
             );
 
@@ -450,14 +443,22 @@ mod tests {
             .unwrap();
 
         // Reset to L2=2000 with L1 origin at 200 — after all entries.
-        // No entries have L2 >= 2000 in the range [200..], so this is a no-op.
+        // No entries need truncating, but the reset head must still become the mapping
+        // for its L1 origin so recovery reads do not return the older entry at L1=100.
         let reset = l2_block_info(0xDD, 2000, 0x02, 200);
         db.safe_head_reset(reset).await.unwrap();
 
-        // Original entry should still exist.
+        // The earlier mapping remains available before the reset origin.
         let resp = db.safe_head_at_l1(100).await.unwrap();
         assert_eq!(resp.safe_head.number, 1000);
         assert_eq!(resp.safe_head.hash, B256::from([0xAA; 32]));
+
+        // The reset origin resolves to its persisted anchor even though no tail was deleted.
+        let resp = db.safe_head_at_l1(200).await.unwrap();
+        assert_eq!(resp.l1_block.number, 200);
+        assert_eq!(resp.l1_block.hash, B256::from([0x02; 32]));
+        assert_eq!(resp.safe_head.number, 2000);
+        assert_eq!(resp.safe_head.hash, B256::from([0xDD; 32]));
     }
 
     /// Verify that a reset whose L1 origin falls in a **gap** between two stored
