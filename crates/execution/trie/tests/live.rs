@@ -7,7 +7,7 @@ use alloy_genesis::{Genesis, GenesisAccount};
 use alloy_primitives::{Address, B256, TxKind, U256, keccak256};
 use base_execution_trie::{
     BaseProofsStorage, BaseProofsStorageError, RethTrieStorageLayout, RocksdbProofsStorage,
-    initialize::InitializationJob, live::LiveTrieCollector,
+    initialize::InitializationJob, live::{BatchBlock, LiveTrieCollector},
 };
 use derive_more::Constructor;
 use reth_chainspec::{ChainSpec, ChainSpecBuilder, EthereumHardfork, MAINNET, MIN_TRANSACTION_GAS};
@@ -518,4 +518,53 @@ fn test_blocks_with_multiple_transactions() {
     );
 
     run_test_scenario(scenario, provider_factory, chain_spec, key_pair, storage).unwrap();
+}
+
+/// Rejects a genesis block before subtracting one to find its parent.
+///
+/// The live collector only stores descendants of the initialized proof window. A replayed genesis
+/// block must return a recoverable error rather than underflowing its block number and panicking.
+#[test]
+fn test_execute_and_store_block_updates_rejects_genesis_block() {
+    let dir = TempDir::new().unwrap();
+    let storage: BaseProofsStorage<Arc<RocksdbProofsStorage>> =
+        Arc::new(RocksdbProofsStorage::new(dir.path()).expect("env")).into();
+
+    let secp = Secp256k1::new();
+    let key_pair = Keypair::new(&secp, &mut rand_08::thread_rng());
+    let sender = public_key_to_address(key_pair.public_key());
+    let chain_spec = chain_spec_with_address(sender);
+    let provider_factory = create_test_provider_factory_with_chain_spec(Arc::clone(&chain_spec));
+    init_genesis(&provider_factory).unwrap();
+
+    run_test_scenario(
+        TestScenario::new(vec![], vec![]),
+        provider_factory.clone(),
+        Arc::clone(&chain_spec),
+        key_pair,
+        storage.clone(),
+    )
+    .unwrap();
+
+    let collector = LiveTrieCollector::new(
+        EthEvmConfig::ethereum(Arc::clone(&chain_spec)),
+        BlockchainProvider::new(provider_factory).unwrap(),
+        &storage,
+    );
+    let genesis = create_block_from_spec(
+        &BlockSpec::new(vec![]),
+        0,
+        B256::ZERO,
+        &chain_spec,
+        key_pair,
+        &mut 0,
+    );
+
+    let error = collector.execute_and_store_block_updates(&genesis).unwrap_err();
+
+    assert!(matches!(error, BaseProofsStorageError::UnknownParent));
+
+    let error = collector.execute_and_store_batch(vec![BatchBlock::Execute(Box::new(genesis))]).unwrap_err();
+
+    assert!(matches!(error, BaseProofsStorageError::UnknownParent));
 }
