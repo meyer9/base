@@ -546,14 +546,16 @@ where
                             self.on_admin_start();
                             let _ = reply.send(Ok(()));
                         }
-                        AdminCommand::SetThrottle { strategy, config } => {
+                        AdminCommand::SetThrottle { strategy, config, reply } => {
                             self.throttle.set_controller(
                                 ThrottleController::new(config, strategy)
                             );
+                            let _ = reply.send(Ok(()));
                             info!("throttle controller replaced via admin");
                         }
-                        AdminCommand::ResetThrottle => {
+                        AdminCommand::ResetThrottle { reply } => {
                             self.throttle.reset();
+                            let _ = reply.send(Ok(()));
                             info!("throttle controller reset via admin");
                         }
                         AdminCommand::GetThrottleInfo { reply } => {

@@ -68,9 +68,16 @@ pub enum AdminCommand {
         /// The new throttle configuration to apply.
         #[debug(skip)]
         config: ThrottleConfig,
+        /// Answered once the driver has installed the replacement controller.
+        #[debug(skip)]
+        reply: oneshot::Sender<AdminResult<()>>,
     },
     /// Clear the throttle dedup cache so limits are re-applied unconditionally.
-    ResetThrottle,
+    ResetThrottle {
+        /// Answered once the driver has cleared the dedup cache.
+        #[debug(skip)]
+        reply: oneshot::Sender<AdminResult<()>>,
+    },
     /// Read current throttle state; reply sent via the embedded oneshot sender.
     GetThrottleInfo {
         /// Channel to send the throttle info snapshot back on.
@@ -133,13 +140,13 @@ impl AdminHandle {
         strategy: ThrottleStrategy,
         config: ThrottleConfig,
     ) -> AdminResult<()> {
-        self.send(AdminCommand::SetThrottle { strategy, config }).await
+        self.request(|reply| AdminCommand::SetThrottle { strategy, config, reply }).await
     }
 
     /// Clear the throttle dedup cache so limits are re-applied unconditionally
     /// on the next driver iteration.
     pub async fn reset_throttle(&self) -> AdminResult<()> {
-        self.send(AdminCommand::ResetThrottle).await
+        self.request(|reply| AdminCommand::ResetThrottle { reply }).await
     }
 
     /// Read the current throttle controller state.
@@ -206,5 +213,40 @@ mod tests {
         let (handle, _rx) = AdminHandle::channel();
         let err = handle.set_log_level("debug".to_string()).unwrap_err();
         assert!(matches!(err, AdminError::NotSupported(_)));
+    }
+
+    #[tokio::test]
+    async fn throttle_updates_wait_for_driver_acknowledgement() {
+        let (handle, mut rx) = AdminHandle::channel();
+        let (finished_tx, mut finished_rx) = oneshot::channel();
+        let config = ThrottleConfig::default();
+
+        let set_throttle_handle = handle.clone();
+        tokio::spawn(async move {
+            let result = set_throttle_handle.set_throttle(ThrottleStrategy::Step, config).await;
+            finished_tx.send(result).expect("test receiver must remain open");
+        });
+
+        let command = rx.recv().await.expect("the handle must send a command");
+        assert!(matches!(finished_rx.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+        let AdminCommand::SetThrottle { reply, .. } = command else {
+            panic!("expected set throttle command");
+        };
+        reply.send(Ok(())).expect("request must still await the driver reply");
+        assert!(finished_rx.await.expect("request task must finish").is_ok());
+
+        let (finished_tx, mut finished_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let result = handle.reset_throttle().await;
+            finished_tx.send(result).expect("test receiver must remain open");
+        });
+
+        let command = rx.recv().await.expect("the handle must send a command");
+        assert!(matches!(finished_rx.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+        let AdminCommand::ResetThrottle { reply } = command else {
+            panic!("expected reset throttle command");
+        };
+        reply.send(Ok(())).expect("request must still await the driver reply");
+        assert!(finished_rx.await.expect("request task must finish").is_ok());
     }
 }
