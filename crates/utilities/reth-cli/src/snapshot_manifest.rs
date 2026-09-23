@@ -133,7 +133,7 @@ impl SnapshotManifestExt for SnapshotManifest {
         let ComponentManifest::Chunked(meta) = self.components.get(&component)? else {
             return None;
         };
-        let chunk_index = usize::try_from(start / meta.blocks_per_file).ok()?;
+        let chunk_index = usize::try_from(start.checked_div(meta.blocks_per_file)?).ok()?;
         let entries = meta.chunk_output_files.get(chunk_index)?;
         if entries.is_empty() {
             return None;
@@ -148,7 +148,7 @@ impl SnapshotManifestExt for SnapshotManifest {
         let ComponentManifest::Chunked(meta) = self.components.get(&component)? else {
             return None;
         };
-        let chunk_index = usize::try_from(start / meta.blocks_per_file).ok()?;
+        let chunk_index = usize::try_from(start.checked_div(meta.blocks_per_file)?).ok()?;
         let entries = meta.chunk_output_files.get(chunk_index)?;
         if entries.is_empty() {
             return None;
@@ -161,7 +161,7 @@ impl SnapshotManifestExt for SnapshotManifest {
         let ComponentManifest::Chunked(meta) = self.components.get(&component)? else {
             return None;
         };
-        let chunk_index = usize::try_from(start / meta.blocks_per_file).ok()?;
+        let chunk_index = usize::try_from(start.checked_div(meta.blocks_per_file)?).ok()?;
         meta.chunk_sizes.get(chunk_index).copied()
     }
 
@@ -1455,6 +1455,68 @@ mod tests {
         assert!(
             headers.get("chunk_skipped").is_none(),
             "published manifest should not encode upload-time skip decisions"
+        );
+    }
+
+    #[test]
+    fn malformed_previous_manifest_rebuilds_archive() {
+        let source = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let db_dir = source.path().join("db");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        std::fs::write(db_dir.join("mdbx.dat"), b"state").unwrap();
+
+        let static_files = source.path().join("static_files");
+        std::fs::create_dir_all(&static_files).unwrap();
+        std::fs::write(static_files.join("static_file_headers_0_499999"), b"headers").unwrap();
+
+        let remote = HashMap::from([("headers-0-499999.tar.zst".to_string(), 123)]);
+        let previous_manifest = SnapshotManifest {
+            block: 500_000,
+            chain_id: 8453,
+            storage_version: 2,
+            timestamp: 0,
+            base_url: None,
+            reth_version: None,
+            components: BTreeMap::from([(
+                "headers".to_string(),
+                ComponentManifest::Chunked(ChunkedArchive {
+                    blocks_per_file: 0,
+                    total_blocks: 500_000,
+                    chunk_sizes: vec![123],
+                    chunk_decompressed_sizes: vec![0],
+                    chunk_output_files: vec![vec![OutputFileChecksum {
+                        path: "static_files/static_file_headers_0_499999".to_string(),
+                        size: 7,
+                        blake3: "invalid".to_string(),
+                    }]],
+                    chunk_files: vec![],
+                }),
+            )]),
+        };
+
+        assert_eq!(previous_manifest.chunk_hashes_for_file("headers-0-499999.tar.zst"), None);
+        assert_eq!(previous_manifest.chunk_output_files_for_file("headers-0-499999.tar.zst"), None);
+        assert_eq!(previous_manifest.chunk_size_for_file("headers-0-499999.tar.zst"), None);
+
+        let files = SnapshotGenerator::generate_manifest(&ManifestGenerationParams {
+            source_datadir: source.path(),
+            output_dir: Some(output.path()),
+            chain_id: 8453,
+            base_url: None,
+            block: Some(500_000),
+            blocks_per_file: Some(500_000),
+            remote_static_files: &remote,
+            previous_manifest: Some(&previous_manifest),
+            upload_proofs: false,
+        })
+        .unwrap();
+
+        assert!(
+            files.iter().any(|path| path
+                .file_name()
+                .is_some_and(|name| name == "headers-0-499999.tar.zst")),
+            "a malformed previous manifest must not prevent rebuilding the archive"
         );
     }
 }
