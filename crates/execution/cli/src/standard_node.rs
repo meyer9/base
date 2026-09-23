@@ -448,6 +448,18 @@ pub struct RpcStandardNodeArgs {
     pub inline_simulation_timeout_ms: u64,
 }
 
+impl RpcStandardNodeArgs {
+    /// Applies upgrade-signal defaults shared by Base commands embedding consensus beside this node.
+    pub fn apply_integrated_upgrade_signal_defaults(
+        &mut self,
+        chain_id: u64,
+        consensus_l1_rpc: &Url,
+    ) {
+        self.rollup_args.upgrade_signal.apply_chain_default(chain_id);
+        self.rollup_args.upgrade_signal_l1_rpc.apply_default_from(consensus_l1_rpc);
+    }
+}
+
 impl From<RpcStandardNodeArgs> for StandardNodeArgs {
     fn from(mut args: RpcStandardNodeArgs) -> Self {
         if args.rollup_args.sequencer.is_none() {
@@ -989,6 +1001,51 @@ mod tests {
             inline_simulation_queue_capacity: DEFAULT_INLINE_SIMULATION_QUEUE_CAPACITY,
             inline_simulation_timeout_ms: DEFAULT_INLINE_SIMULATION_TIMEOUT_MS,
         }
+    }
+
+    #[test]
+    fn integrated_upgrade_signal_defaults_use_execution_chain_and_consensus_l1_rpc() {
+        let mut args = default_rpc_standard_node_args();
+        let consensus_l1_rpc = Url::parse("http://consensus-l1:8545").unwrap();
+
+        args.apply_integrated_upgrade_signal_defaults(8453, &consensus_l1_rpc);
+
+        assert_eq!(
+            args.rollup_args.upgrade_signal.contract_address,
+            Some(address!("7480Afc8D99a5c645c247dB5A1e4a4f440e6e095"))
+        );
+        assert_eq!(
+            args.rollup_args
+                .upgrade_signal_l1_rpc
+                .upgrade_signal_l1_rpc
+                .as_ref()
+                .map(Url::as_str),
+            Some("http://consensus-l1:8545/")
+        );
+    }
+
+    #[test]
+    fn integrated_upgrade_signal_defaults_preserve_explicit_execution_values() {
+        let mut args = default_rpc_standard_node_args();
+        let explicit_contract = address!("0000000000000000000000000000000000000001");
+        let explicit_l1_rpc = Url::parse("http://execution-l1:8545").unwrap();
+        args.rollup_args.upgrade_signal.contract_address = Some(explicit_contract);
+        args.rollup_args.upgrade_signal_l1_rpc.upgrade_signal_l1_rpc = Some(explicit_l1_rpc);
+
+        args.apply_integrated_upgrade_signal_defaults(
+            8453,
+            &Url::parse("http://consensus-l1:8545").unwrap(),
+        );
+
+        assert_eq!(args.rollup_args.upgrade_signal.contract_address, Some(explicit_contract));
+        assert_eq!(
+            args.rollup_args
+                .upgrade_signal_l1_rpc
+                .upgrade_signal_l1_rpc
+                .as_ref()
+                .map(Url::as_str),
+            Some("http://execution-l1:8545/")
+        );
     }
 
     #[test]
