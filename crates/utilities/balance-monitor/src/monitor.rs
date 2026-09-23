@@ -110,15 +110,22 @@ where
             interval.tick().await;
             loop {
                 tokio::select! {
+                    biased;
                     () = cancel.cancelled() => break,
                     _ = interval.tick() => {
-                        match provider.get_balance(address).await {
-                            Ok(bal) => {
-                                let _ = tx.send(bal);
-                                debug!(balance = %bal, address = %address, "recorded account balance");
-                            }
-                            Err(e) => {
-                                warn!(error = %e, address = %address, "failed to fetch account balance");
+                        tokio::select! {
+                            biased;
+                            () = cancel.cancelled() => break,
+                            result = provider.get_balance(address) => {
+                                match result {
+                                    Ok(bal) => {
+                                        let _ = tx.send(bal);
+                                        debug!(balance = %bal, address = %address, "recorded account balance");
+                                    }
+                                    Err(e) => {
+                                        warn!(error = %e, address = %address, "failed to fetch account balance");
+                                    }
+                                }
                             }
                         }
                     }
@@ -136,6 +143,7 @@ mod tests {
 
     use alloy_primitives::{Address, U256};
     use alloy_provider::ProviderBuilder;
+    use tokio::{net::TcpListener, sync::oneshot};
     use tokio_util::sync::CancellationToken;
 
     use super::BalanceMonitorLayer;
@@ -185,5 +193,36 @@ mod tests {
         })
         .await;
         assert!(result.is_ok(), "channel should close after cancellation");
+    }
+
+    #[tokio::test]
+    async fn cancellation_interrupts_an_in_flight_balance_request() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind test listener");
+        let address = listener.local_addr().expect("listener address");
+        let (request_started_tx, request_started_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.expect("accept balance request");
+            let _ = request_started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        let cancel = CancellationToken::new();
+        let (layer, mut balance_rx) =
+            BalanceMonitorLayer::new(Address::ZERO, cancel.clone(), Duration::from_millis(1));
+        let endpoint = format!("http://{address}").parse().expect("parse endpoint URL");
+        let _provider = ProviderBuilder::new().layer(layer).connect_http(endpoint);
+
+        tokio::time::timeout(Duration::from_secs(1), request_started_rx)
+            .await
+            .expect("balance request should reach server")
+            .expect("balance request signal should be sent");
+
+        cancel.cancel();
+
+        tokio::time::timeout(Duration::from_secs(1), balance_rx.changed())
+            .await
+            .expect("cancellation should stop an in-flight balance request")
+            .expect_err("balance monitor sender should close after cancellation");
+
+        server.abort();
     }
 }
