@@ -33,7 +33,7 @@ rstest.workspace = true
 reqwest.workspace = true
 jsonrpsee = { workspace = true, features = ["http-client"] }
 alloy-transport-http = { workspace = true, features = ["reqwest"] }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 
 [features]
 axum-server = [

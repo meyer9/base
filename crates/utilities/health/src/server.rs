@@ -39,7 +39,7 @@ impl ServerState {
 
     /// `GET /readyz` — readiness probe.
     async fn readiness(State(state): State<Self>) -> StatusCode {
-        if state.ready.load(Ordering::Relaxed) {
+        if state.ready.load(Ordering::Acquire) {
             StatusCode::OK
         } else {
             StatusCode::SERVICE_UNAVAILABLE
@@ -91,13 +91,17 @@ impl HealthServer {
         ready: Arc<AtomicBool>,
         cancel: CancellationToken,
     ) -> eyre::Result<()> {
-        let app = Self::router(ready);
+        let app = Self::router(Arc::clone(&ready));
 
         let listener = TcpListener::bind(addr).await?;
         info!(%addr, "Health server started");
 
+        let shutdown_ready = Arc::clone(&ready);
         axum::serve(listener, app)
-            .with_graceful_shutdown(async move { cancel.cancelled().await })
+            .with_graceful_shutdown(async move {
+                cancel.cancelled().await;
+                shutdown_ready.store(false, Ordering::Release);
+            })
             .await?;
 
         info!("Health server stopped");
@@ -116,7 +120,10 @@ mod tests {
     };
 
     use rstest::rstest;
-    use tokio::task::JoinHandle;
+    use tokio::{
+        task::JoinHandle,
+        time::{Duration, timeout},
+    };
     use tokio_util::sync::CancellationToken;
 
     use super::*;
@@ -129,13 +136,17 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let app = HealthServer::router(ready);
+        let app = HealthServer::router(Arc::clone(&ready));
         let cancel = CancellationToken::new();
         let cancel_for_shutdown = cancel.clone();
+        let shutdown_ready = Arc::clone(&ready);
 
         let handle = tokio::spawn(async move {
             axum::serve(listener, app)
-                .with_graceful_shutdown(async move { cancel_for_shutdown.cancelled().await })
+                .with_graceful_shutdown(async move {
+                    cancel_for_shutdown.cancelled().await;
+                    shutdown_ready.store(false, Ordering::Release);
+                })
                 .await
                 .unwrap();
         });
@@ -160,6 +171,23 @@ mod tests {
         assert_eq!(resp.status(), expected_status);
 
         cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_cancellation_marks_server_unready() {
+        let ready = Arc::new(AtomicBool::new(true));
+        let cancel = CancellationToken::new();
+        let server = tokio::spawn(HealthServer::serve(
+            "127.0.0.1:0".parse().unwrap(),
+            Arc::clone(&ready),
+            cancel.clone(),
+        ));
+
+        tokio::task::yield_now().await;
+        cancel.cancel();
+        timeout(Duration::from_secs(1), server).await.unwrap().unwrap().unwrap();
+
+        assert!(!ready.load(Ordering::Acquire));
     }
 
     #[tokio::test]
