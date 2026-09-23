@@ -139,6 +139,10 @@ impl EthereumHardforks for RollupConfig {
                 self.upgrade_activation_timestamp(BaseUpgrade::Holocene),
                 self.upgrade_activation_timestamp(BaseUpgrade::Isthmus),
                 self.upgrade_activation_timestamp(BaseUpgrade::Jovian),
+                self.upgrade_activation_timestamp(BaseUpgrade::Azul),
+                self.upgrade_activation_timestamp(BaseUpgrade::Beryl),
+                self.upgrade_activation_timestamp(BaseUpgrade::Cobalt),
+                self.upgrade_activation_timestamp(BaseUpgrade::Denim),
             ])
         } else if fork <= EthereumHardfork::Cancun {
             // Ecotone activates Cancun; cascade through later Base upgrades if unset.
@@ -149,17 +153,28 @@ impl EthereumHardforks for RollupConfig {
                 self.upgrade_activation_timestamp(BaseUpgrade::Holocene),
                 self.upgrade_activation_timestamp(BaseUpgrade::Isthmus),
                 self.upgrade_activation_timestamp(BaseUpgrade::Jovian),
+                self.upgrade_activation_timestamp(BaseUpgrade::Azul),
+                self.upgrade_activation_timestamp(BaseUpgrade::Beryl),
+                self.upgrade_activation_timestamp(BaseUpgrade::Cobalt),
+                self.upgrade_activation_timestamp(BaseUpgrade::Denim),
             ])
         } else if fork <= EthereumHardfork::Prague {
             // Isthmus activates Prague; cascade through later Base upgrades if unset.
             cascade(&[
                 self.upgrade_activation_timestamp(BaseUpgrade::Isthmus),
                 self.upgrade_activation_timestamp(BaseUpgrade::Jovian),
+                self.upgrade_activation_timestamp(BaseUpgrade::Azul),
+                self.upgrade_activation_timestamp(BaseUpgrade::Beryl),
+                self.upgrade_activation_timestamp(BaseUpgrade::Cobalt),
+                self.upgrade_activation_timestamp(BaseUpgrade::Denim),
             ])
         } else if fork <= EthereumHardfork::Osaka {
-            self.upgrade_activation_timestamp(BaseUpgrade::Azul)
-                .map(ForkCondition::Timestamp)
-                .unwrap_or(ForkCondition::Never)
+            cascade(&[
+                self.upgrade_activation_timestamp(BaseUpgrade::Azul),
+                self.upgrade_activation_timestamp(BaseUpgrade::Beryl),
+                self.upgrade_activation_timestamp(BaseUpgrade::Cobalt),
+                self.upgrade_activation_timestamp(BaseUpgrade::Denim),
+            ])
         } else {
             ForkCondition::Never
         }
@@ -1015,10 +1030,25 @@ mod tests {
         };
         assert_eq!(cfg.ethereum_fork_activation(EthereumHardfork::Osaka), ForkCondition::Never);
 
-        // Jovian set but Azul unset → Osaka is Never.
+        // A later Base execution upgrade inherits the full Osaka execution rules. This matters for
+        // dynamically supplied schedules, which may only contain the currently supported upgrade
+        // instead of every historical predecessor.
         let mut cfg = RollupConfig::default();
-        cfg.upgrades.jovian_time = Some(900);
-        assert_eq!(cfg.ethereum_fork_activation(EthereumHardfork::Osaka), ForkCondition::Never);
+        cfg.upgrades.base = BaseUpgradeConfig {
+            azul: None,
+            beryl: None,
+            cobalt: Some(900),
+            denim: None,
+            zenith: None,
+        };
+        for fork in [
+            EthereumHardfork::Shanghai,
+            EthereumHardfork::Cancun,
+            EthereumHardfork::Prague,
+            EthereumHardfork::Osaka,
+        ] {
+            assert_eq!(cfg.ethereum_fork_activation(fork), ForkCondition::Timestamp(900));
+        }
     }
 
     #[test]
