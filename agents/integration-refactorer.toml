@@ -19,4 +19,6 @@ PR: reject weak candidates, then search another bounded integration opportunity.
 For a larger separable refactoring, use `gh stack` only when each layer is
 independently reviewable and validated. Do not satisfy the goal with a report,
 a null-result artifact, or a cosmetic PR.
+A roadmap-aligned feature completion is valid when it closes a real supported integration boundary with an observable user/operator action and focused integration evidence. Do not reduce a larger ownership problem to a cosmetic wrapper edit merely to keep the PR small.
+
 """

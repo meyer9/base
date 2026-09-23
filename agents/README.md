@@ -65,3 +65,21 @@ For every PR, write a body file outside the tracked diff and create the PR with
 non-empty and has **Outcome**, **Preserved contract**, **Validation**, and
 **Scope** headings before reporting its URL. Repair a missing or incomplete body
 before considering the `/goal` complete.
+
+## Substantive change bar
+
+Prefer a coherent refactor, reliability/correctness fix, or feature completion
+that changes a meaningful user/operator path, removes real ownership or
+integration surface, or closes a supported vertical slice. Do not optimize for
+the smallest possible diff or select a parser/zero-value guard merely because it
+is easy. A configuration-validation-only PR is acceptable only when the accepted
+configuration can cause a credible unsafe, corrupting, non-progressing, or
+materially misleading production state, and the PR demonstrates that outcome.
+
+Feature additions are allowed when they advance the current roadmap or complete
+a supported capability: define the user action, integration boundary, preserved
+contract, observability/operational behavior, and focused E2E or integration
+evidence. Do not add a speculative framework or a feature with no supported
+consumer. When the right improvement is larger, plan a small PR stack with
+independently useful layers instead of shrinking the work into a superficial
+guard.
