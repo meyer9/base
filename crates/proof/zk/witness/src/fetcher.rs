@@ -525,7 +525,8 @@ impl OPSuccinctDataFetcher {
                 earliest_l1_header = Some(l1_block_header);
             }
         }
-        Ok(earliest_l1_header.unwrap())
+        earliest_l1_header
+            .ok_or_else(|| anyhow!("cannot find an earliest L1 head in an empty boot-info batch"))
     }
 
     /// Get the latest L1 header in a batch of boot infos.
@@ -884,10 +885,33 @@ mod tests {
         }
     }
 
+    fn fetcher() -> OPSuccinctDataFetcher {
+        let rpc_config = rpc_config(None, None);
+        OPSuccinctDataFetcher {
+            l1_provider: Arc::new(
+                ProviderBuilder::default().connect_http(rpc_config.l1_rpc.clone()),
+            ),
+            l2_provider: Arc::new(
+                ProviderBuilder::default().connect_http(rpc_config.l2_rpc.clone()),
+            ),
+            rpc_config,
+            rollup_config: None,
+            rollup_config_path: None,
+            l1_config_path: None,
+        }
+    }
+
     #[test]
     fn explicit_config_dirs_win_over_defaults() {
         let rpc = rpc_config(Some(PathBuf::from("/tmp/l1")), Some(PathBuf::from("/tmp/l2")));
         assert_eq!(rpc.l1_config_directory(), PathBuf::from("/tmp/l1"));
         assert_eq!(rpc.l2_config_directory(), PathBuf::from("/tmp/l2"));
+    }
+
+    #[tokio::test]
+    async fn header_preimages_reject_an_empty_boot_info_batch() {
+        let error = fetcher().get_header_preimages(&Vec::new(), B256::ZERO).await.unwrap_err();
+
+        assert!(error.to_string().contains("empty boot-info batch"));
     }
 }
