@@ -49,3 +49,11 @@ cost. Let the code, current roadmap, existing PRs, and affected users/operators
 identify the opportunity; do not treat a canned list of subsystems or solution
 patterns as a work queue. For performance, choose the benchmark tier only after
 the workload and bottleneck are understood.
+
+## PR description gate
+
+For every PR, write a body file outside the tracked diff and create the PR with
+`gh pr create --body-file`. Immediately retrieve the PR body and verify it is
+non-empty and has **Outcome**, **Preserved contract**, **Validation**, and
+**Scope** headings before reporting its URL. Repair a missing or incomplete body
+before considering the `/goal` complete.
