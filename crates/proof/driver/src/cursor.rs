@@ -82,13 +82,19 @@ impl PipelineCursor {
 
     /// Advances the cursor to a new L1 origin and corresponding L2 tip.
     pub fn advance(&mut self, origin: BlockInfo, l2_tip_block: TipCursor) {
-        if self.tips.len() >= self.capacity {
-            let key = self.origins.pop_front().unwrap();
-            self.tips.remove(&key);
+        if !self.origin_infos.contains_key(&origin.number) {
+            if self.origin_infos.len() >= self.capacity {
+                let key = self
+                    .origins
+                    .pop_front()
+                    .expect("origin queue must contain every cached origin");
+                self.origin_infos.remove(&key);
+                self.tips.remove(&key);
+            }
+            self.origins.push_back(origin.number);
         }
 
         self.origin = origin;
-        self.origins.push_back(origin.number);
         self.origin_infos.insert(origin.number, origin);
         self.tips.insert(origin.number, l2_tip_block);
     }
@@ -117,5 +123,46 @@ impl PipelineCursor {
                 (l2_known_tip.clone(), self.origin_infos[last_l1_known_tip])
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy_consensus::{Header, Sealable};
+    use alloy_primitives::B256;
+    use base_protocol::{BlockInfo, L2BlockInfo};
+
+    use super::PipelineCursor;
+    use crate::TipCursor;
+
+    fn origin(number: u64) -> BlockInfo {
+        BlockInfo { number, ..Default::default() }
+    }
+
+    fn tip(number: u64) -> TipCursor {
+        TipCursor::new(
+            L2BlockInfo { block_info: origin(number), ..Default::default() },
+            Header::default().seal_slow(),
+            B256::ZERO,
+        )
+    }
+
+    #[test]
+    fn advance_keeps_repeated_origins_within_cache_capacity() {
+        let initial_origin = origin(0);
+        let mut cursor = PipelineCursor::new(1, initial_origin);
+
+        for _ in 0..10 {
+            cursor.advance(initial_origin, tip(0));
+        }
+        for number in 1..=u64::try_from(cursor.capacity + 1).unwrap() {
+            cursor.advance(origin(number), tip(number));
+        }
+
+        assert_eq!(cursor.origins.len(), cursor.capacity);
+        assert_eq!(cursor.origin_infos.len(), cursor.capacity);
+        assert_eq!(cursor.tips.len(), cursor.capacity);
+        assert_eq!(cursor.origins.front(), Some(&2));
+        assert_eq!(cursor.origins.back(), Some(&(cursor.capacity as u64 + 1)));
     }
 }
