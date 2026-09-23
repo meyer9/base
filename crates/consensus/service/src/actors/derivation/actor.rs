@@ -284,6 +284,13 @@ where
             DerivationActorRequest::ProcessEngineSafeHeadUpdateRequest(safe_head) => {
                 info!(target: "derivation", safe_head = ?*safe_head, "Received safe head from engine.");
 
+                // Engine notifications are at-least-once. A duplicate must not consume the L1
+                // inclusion block for a newer payload or trigger another derivation attempt.
+                if self.derivation_state_machine.is_confirmed_safe_head(&safe_head) {
+                    debug!(target: "derivation", safe_head = ?*safe_head, "Ignoring duplicate safe head update");
+                    return Ok(());
+                }
+
                 // Key the SafeDB entry by the L1 inclusion block (the L1 block whose data
                 // contained the batch), not the L2 block's epoch origin. This gives finer
                 // granularity: each batch's outcome is tracked at the L1 block where it landed.
