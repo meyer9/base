@@ -41,46 +41,20 @@ impl ChainUpgradesExt for ChainUpgrades {
             ),
         ];
 
-        forks.push((BaseUpgrade::Bedrock.boxed(), self[BaseUpgrade::Bedrock]));
-        forks.push((BaseUpgrade::Regolith.boxed(), self[BaseUpgrade::Regolith]));
+        for upgrade in BaseUpgrade::EXECUTION_VARIANTS {
+            let condition = self[upgrade];
+            // Keep the historical pre-Jovian entries even when inactive so existing schedules and
+            // fork IDs are unchanged. Later entries need only appear once configured.
+            if matches!(condition, ForkCondition::Never)
+                && upgrade.execution_idx() >= BaseUpgrade::Jovian.execution_idx()
+            {
+                continue;
+            }
 
-        let canyon = self[BaseUpgrade::Canyon];
-        forks.push((EthereumHardfork::Shanghai.boxed(), canyon));
-        forks.push((BaseUpgrade::Canyon.boxed(), canyon));
-
-        let ecotone = self[BaseUpgrade::Ecotone];
-        forks.push((EthereumHardfork::Cancun.boxed(), ecotone));
-        forks.push((BaseUpgrade::Ecotone.boxed(), ecotone));
-
-        forks.push((BaseUpgrade::Fjord.boxed(), self[BaseUpgrade::Fjord]));
-        forks.push((BaseUpgrade::Granite.boxed(), self[BaseUpgrade::Granite]));
-        forks.push((BaseUpgrade::Holocene.boxed(), self[BaseUpgrade::Holocene]));
-
-        let isthmus = self[BaseUpgrade::Isthmus];
-        if !matches!(isthmus, ForkCondition::Never) {
-            forks.push((EthereumHardfork::Prague.boxed(), isthmus));
-            forks.push((BaseUpgrade::Isthmus.boxed(), isthmus));
-        }
-
-        let jovian = self[BaseUpgrade::Jovian];
-        if !matches!(jovian, ForkCondition::Never) {
-            forks.push((BaseUpgrade::Jovian.boxed(), jovian));
-        }
-
-        let azul = self[BaseUpgrade::Azul];
-        if !matches!(azul, ForkCondition::Never) {
-            forks.push((EthereumHardfork::Osaka.boxed(), azul));
-            forks.push((BaseUpgrade::Azul.boxed(), azul));
-        }
-
-        let beryl = self[BaseUpgrade::Beryl];
-        if !matches!(beryl, ForkCondition::Never) {
-            forks.push((BaseUpgrade::Beryl.boxed(), beryl));
-        }
-
-        let cobalt = self[BaseUpgrade::Cobalt];
-        if !matches!(cobalt, ForkCondition::Never) {
-            forks.push((BaseUpgrade::Cobalt.boxed(), cobalt));
+            if let Some(ethereum_hardfork) = upgrade.execution_hardfork() {
+                forks.push((Box::new(ethereum_hardfork), condition));
+            }
+            forks.push((Box::new(upgrade), condition));
         }
 
         ChainHardforks::new(forks)
@@ -92,6 +66,15 @@ mod tests {
     use base_common_chains::BaseUpgradeExt;
 
     use super::*;
+
+    #[test]
+    fn scheduled_denim_is_included_in_reth_schedule() {
+        let upgrades =
+            ChainUpgrades::new([(BaseUpgrade::Denim, ForkCondition::Timestamp(1_000_000))])
+                .to_chain_upgrades();
+
+        assert_eq!(upgrades.get(BaseUpgrade::Denim), Some(ForkCondition::Timestamp(1_000_000)));
+    }
 
     #[test]
     fn azul_expands_to_osaka() {
