@@ -40,11 +40,14 @@ impl PipelineCursor {
         // Ref: <https://specs.base.org/protocol/consensus/derivation#timeouts>
         let capacity = channel_timeout as usize + 5;
 
-        let mut origins = VecDeque::with_capacity(capacity);
-        origins.push_back(origin.number);
-        let mut origin_infos = HashMap::default();
-        origin_infos.insert(origin.number, origin);
-        Self { capacity, channel_timeout, origin, origins, origin_infos, tips: Default::default() }
+        Self {
+            capacity,
+            channel_timeout,
+            origin,
+            origins: VecDeque::with_capacity(capacity),
+            origin_infos: HashMap::default(),
+            tips: Default::default(),
+        }
     }
 
     /// Returns the current L1 origin block being processed by the pipeline.
@@ -83,8 +86,12 @@ impl PipelineCursor {
     /// Advances the cursor to a new L1 origin and corresponding L2 tip.
     pub fn advance(&mut self, origin: BlockInfo, l2_tip_block: TipCursor) {
         if self.tips.len() >= self.capacity {
-            let key = self.origins.pop_front().unwrap();
+            let key = self
+                .origins
+                .pop_front()
+                .expect("cursor cache entries match tip entries");
             self.tips.remove(&key);
+            self.origin_infos.remove(&key);
         }
 
         self.origin = origin;
@@ -117,5 +124,41 @@ impl PipelineCursor {
                 (l2_known_tip.clone(), self.origin_infos[last_l1_known_tip])
             }
         }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use alloy_primitives::B256;
+    use base_protocol::L2BlockInfo;
+
+    use super::*;
+
+    fn origin(number: u64) -> BlockInfo {
+        BlockInfo::new(B256::with_last_byte(number as u8), number, B256::ZERO, 0)
+    }
+
+    fn tip() -> TipCursor {
+        TipCursor::new(
+            L2BlockInfo::default(),
+            Sealed::new(Header::default(), B256::ZERO),
+            B256::ZERO,
+        )
+    }
+
+    #[test]
+    fn advance_evicts_origin_metadata_with_tip_cache() {
+        let mut cursor = PipelineCursor::new(1, origin(0));
+
+        for number in 0..20 {
+            cursor.advance(origin(number), tip());
+        }
+
+        assert_eq!(cursor.tips.len(), cursor.capacity);
+        assert_eq!(cursor.origins.len(), cursor.capacity);
+        assert_eq!(cursor.origin_infos.len(), cursor.capacity);
+        assert!(!cursor.origin_infos.contains_key(&0));
+        assert!(cursor.origin_infos.contains_key(&19));
     }
 }
