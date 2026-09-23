@@ -9,6 +9,8 @@ a metric, a bottleneck hypothesis, and a baseline. If one candidate does not
 survive evidence, continue to another bounded supported candidate; never finish
 the goal with a benchmark-only report, null-result artifact, or unmeasured PR.
 
+Before editing, search open performance PRs and choose one benchmark tier that can prove the claim. Do not duplicate an active optimization.
+
 Use the right benchmark level and state what it proves:
 
 1. Microbenchmarks: use the existing Criterion/cargo bench targets (for example,

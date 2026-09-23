@@ -28,3 +28,25 @@ Use `gh stack init`, `gh stack add`, and `gh stack submit` to create the stack.
 Each PR must state its parent/base, remain focused, pass its relevant validation,
 and be useful if reviewed independently. Do not create a stack to hide an
 inseparable change or to manufacture multiple PRs.
+
+## Opportunity selection and quality gates
+
+Before editing, search open PRs, active agent branches, recent commits, and the
+symbols/files in scope. Do not duplicate an existing active solution. Reserve a
+narrow problem boundary with one user/operator outcome, preserved contract, and
+concrete invariant or obsolete surface. Before committing, inspect `git diff
+--name-only main`: every changed file must belong to the task; agent guidance,
+feature-map docs, CI, workflows, lockfiles, and unrelated configuration are
+forbidden unless directly required. The /goal is a *qualifying* PR, not any PR:
+it needs one clear outcome, focused validation, no duplicate open PR, and a diff
+that proves the claim.
+
+## High-value search themes
+
+Prefer candidates with an explicit invariant and observable consequence: one
+canonical owner for a state transition; duplicate/reordered Engine or derivation
+events; Base-to-Reth mapping duplication; runtime versus startup schedule
+divergence; legacy pre-Holocene special-case removal; configuration accepted but
+ignored; operator-owned versus system-owned lifecycle state; proof/recovery cache
+invalidation; and hardfork activation/reorg/recovery behavior. For performance,
+choose the benchmark tier before editing and require matching evidence.
