@@ -1,111 +1,104 @@
 # Product Direction and Feature Map
 
-**Current as of September 22, 2026.** This is the short product-direction guide
-for contributors and agents. It is not a release note or a complete history.
-Use it before proposing cross-cutting protocol, builder, proof, or operational
-work.
+A short map of what Base owns, where to start, and why the boundaries exist.
+Read it before changing product, protocol, builder, proof, Reth integration, or
+operator behavior. It is an orientation index, not an API reference.
 
-## Direction
+## How to use this map
 
-Base is converging on a **smaller, faster, and more testable production
-system**. Prefer finishing, measuring, and deleting over adding parallel paths
-or speculative capabilities.
+1. Start at the system path that owns the observable behavior.
+2. Follow the listed flow before changing a boundary.
+3. Read the target crate's README, public API, and focused tests before editing.
+4. Keep Base policy at the narrowest required boundary; do not add an adapter
+   that only forwards an upstream API.
 
-A proposal is in direction when it does at least one of the following:
+## System paths
 
-- improves a user- or operator-visible correctness, reliability, security,
-  latency, throughput, or resource-use outcome;
-- completes a vertical slice for an already-planned protocol capability;
-- replaces or removes a superseded path, flag, abstraction, workflow, or test
-  harness; or
-- makes an important production behavior reproducibly observable through a
-  focused E2E test, benchmark, or operational check.
+### Hierarchy
 
-Do not add a new cross-cutting protocol feature, a second implementation of an
-existing path, or documentation-only cleanup unless the owning roadmap or user
-explicitly asks for it.
+- **Entry points** — `bin/base`, `bin/node`, and `bin/consensus` start the
+  unified node, execution node, and consensus node.
+- **Shared protocol** — `crates/common` owns chain/genesis data, transaction
+  and EVM/precompile rules, EIP-8130 types, RPC types, signing, and events.
+- **Execution** — `crates/execution` owns the Base Reth node, chain spec, EVM,
+  txpool, payloads, trie/state, Engine/RPC extensions, and node lifecycle.
+- **Consensus** — `crates/consensus` owns L1 following, derivation, origins,
+  Engine requests, unsafe gossip, SafeDB, peer discovery, upgrades, and RPC.
+- **Batcher** — `crates/batcher` turns safe/finalized L2 blocks into encoded,
+  compressed blob/calldata submissions and tracks L1 confirmation.
+- **Builder** — `crates/builder` adapts pool/state into Base payload ordering,
+  metering, multiplexing, sealing, and publication.
+- **Proofs** — `crates/proof` owns witness/preimages, proof backends, workers,
+  proposer/challenger flows, submission, disputes, and recovery.
+- **Operations** — `crates/infra`, `crates/utilities`, `actions/harness`, and
+  `etc/systems` provide CLI, snapshots, health, telemetry, devnet, benchmarks,
+  system tests, and operator evidence.
 
-## Active product areas
+### Principal flows
 
-| Area | Direction | What good work looks like |
-| --- | --- | --- |
-| Upgrade delivery | Safely activate and operate planned upgrades. | One canonical gate, clear configuration, action/devnet coverage, and observable rollout behavior. |
-| EIP-8130 and validity transactions | Finish the existing end-to-end transaction path. | Correct admission, selection, expiry, recovery, and observability across RPC, txpool, builder, execution, batching, and proofs. |
-| Native assets and policies | Harden the B20/precompile product surface already being delivered. | Correct execution semantics, bounded resource use, upgrade coverage, and user-facing action/devnet evidence. |
-| Proof production and disputes | Make proving and recovery dependable in production. | Reproducible flows, bounded recovery, useful metrics, and failure/restart coverage. |
-| Node and operator experience | Make supported flows easier to run and diagnose. | Faster focused feedback, reliable devnet/system tests, snapshots/recovery checks, and actionable observability. |
+- **User transaction:** RPC → admission/txpool → builder/payload → EVM →
+  state/trie → Engine/RPC result. EIP-8130 must agree across all consumers.
+- **Derived block:** L1 source → derivation/origin → Engine payload → execution
+  → SafeDB/status. Sequencing adds payload requests and unsafe gossip.
+- **Batch:** L2 block source → encode/compress → blob/calldata submission → L1
+  confirmation → derivation can reproduce the chain.
+- **Proof:** agreed inputs → witness/preimages → backend → artifact → proposer
+  or challenger → on-chain resolution.
+- **Operator lifecycle:** configuration → service/actor ownership → metrics and
+  status → restart, recovery, snapshot, or shutdown behavior.
 
-## Flashblocks to 200 ms blocks
+## Reth integration boundary
+
+Reth supplies generic Ethereum-node facilities. Base owns rollup policy and the
+boundary that applies it.
+
+| Reth facility | Base owns |
+| --- | --- |
+| Node/CLI | chain spec, node types, runtime extensions, binary wiring |
+| DB/provider/trie | proof history, retention, custom witness/trie behavior |
+| EVM/execution | Base EVM config, precompiles, native assets, L1 fees, EIP-8130 |
+| Pool/payload | admission/order, metering, composition, sealing policy |
+| RPC/Engine | Base namespaces, rollup Engine handling, trusted-proxy policy |
+| P2P/discovery | rollup peer policy, unsafe gossip, telemetry |
+| ExEx/metrics | shadow indexing, tracing, Base events, system-test adapters |
+
+Use an upstream capability directly when it has the required contract. Add a
+Base adapter only for Base policy, an externally visible Base contract, or an
+upstream compatibility boundary.
+
+## Product direction
+
+Improve a user/operator-visible correctness, reliability, security, latency,
+throughput, or resource-use outcome; complete a planned vertical slice; retire a
+superseded path; or make production behavior reproducibly observable.
+
+Current product areas: upgrade delivery; EIP-8130 and validity transactions;
+native assets and policies; proof production/disputes; and node/operator
+experience. Favor one canonical owner, deterministic feedback, supported-path
+performance evidence, and complete ingress-to-execution-to-operations slices.
+
+### Flashblocks to 200 ms blocks
 
 Base is moving from Flashblocks to 200 ms blocks. The Flashblock builder is
-scheduled for removal by **October 31, 2026**, after 200 ms blocks are
-activated. Sequencing work should make the 200 ms path ready to operate, move
-callers and operators to it, and remove the replaced Flashblocks code, flags,
-tests, metrics, and documentation once migration is proven.
+scheduled for removal by **October 31, 2026**, after 200 ms blocks activate.
+Sequencing work should prepare the 200 ms path, migrate callers/operators, and
+remove replaced Flashblocks surface after migration is proven.
 
-## Legacy OP and transition-system convergence
+### Transition-system convergence
 
-A second simplification goal is to retire inherited Optimism-era behavior that
-predates Holocene. Do not preserve old special cases, flags, mappings, or
-compatibility branches merely because they are established. Remove them when
-the supported post-Holocene behavior and migration condition are explicit and
-covered by focused tests.
+Retire pre-Holocene compatibility when the replacement is explicit and tested.
+For upgrade, derivation, execution, and operator flows, define states, events,
+legal/rejected transitions, recovery, and one canonical owner. Expose effective
+state and transition/failure reasons through status, metrics, or structured logs.
 
-For upgrade, derivation, execution, and operator flows, make state transitions
-explicit rather than implicit in scattered conditionals:
+## Change selection and evidence
 
-- define the meaningful states, inputs/events, legal transitions, terminal
-  conditions, and rejection behavior;
-- keep one canonical transition owner instead of translating the same state
-  across multiple adapters;
-- expose the active state, transition reason, and failure reason through useful
-  metrics, logs, or operator-facing status; and
-- derive hardfork planning from a declarative canonical schedule with clear
-  activation, rollback/recovery, test, and observability requirements.
+Before a PR, state the outcome, preserved contract, roadmap fit, removed or
+avoided surface, and focused evidence. A substantial change normally fixes a
+reproduced cross-boundary failure, removes a complete obsolete production path,
+consolidates a meaningful ownership boundary, or completes a supported feature.
 
-Improve abstractions only when they make the supported state machine or
-ownership boundary clearer and remove real duplication. Avoid generic wrappers
-that conceal transition state, hardfork conditions, or Base-vs-upstream
-responsibility.
-
-## Decision rules for a PR
-
-Before implementing a change, state in the PR description:
-
-1. **User or operator outcome:** Who benefits, what currently fails or costs
-   time/resources, and what observable behavior will improve?
-2. **Roadmap fit:** Which product constraint, deprecation commitment, or
-   supported path it respects. If it touches sequencing, explain how it supports
-   the move to 200 ms blocks.
-3. **Surface reduction:** What old path, duplicate logic, flag, workflow, or
-   ongoing operational cost can be removed or avoided?
-4. **Evidence:** The focused test, E2E scenario, benchmark, or operational
-   check that validates the outcome. Performance claims require a representative
-   baseline and repeatable comparison.
-5. **Documentation need:** Add documentation only when users or operators need
-   durable guidance that clear code, tests, and concise local comments cannot
-   provide.
-
-If the change cannot identify a real outcome and evidence, do not manufacture
-a PR. Report the missing prerequisite, measurement, or product decision.
-
-## Engineering priorities
-
-1. **Delete and consolidate.** Retire superseded compatibility paths and keep
-   one canonical supported workflow.
-2. **Measure supported hot paths.** Pursue performance work only where it
-   serves a supported product path and has representative benchmark or E2E
-   evidence; do not optimize deprecated infrastructure.
-3. **Exercise vertical slices.** Cross-boundary protocol changes need a stable
-   path from ingress through execution and relevant batching/proof/operational
-   behavior.
-4. **Shorten feedback.** Prefer focused, deterministic tests that developers
-   can run routinely over broad, flaky, or manual-only validation.
-
-## Historical context
-
-The preceding development period built the upgrade framework, B20/native
-precompiles, EIP-8130, validity transactions, proof infrastructure, builder
-and batcher capabilities, and operational tooling. The next phase is not to
-multiply those surfaces; it is to make the supported paths converge, perform,
-and remain easy to validate while retiring obsolete sequencing infrastructure.
+Use the narrowest useful evidence: focused regression plus affected-package or
+integration test; system/devnet test for cross-process behavior; and a
+representative baseline/candidate workload for performance. Block-production
+work also follows `docs/guides/BLOCK_PRODUCTION_REVIEW.md`.
