@@ -71,6 +71,7 @@ impl BatcherAdminApiServerImpl {
             AdminError::NotSupported(_) => -32601,
             AdminError::ChannelClosed => -32001,
             AdminError::Stopped => -32002,
+            AdminError::InvalidThrottleConfig(_) => -32602,
         };
         ErrorObjectOwned::owned(code, e.to_string(), None::<()>)
     }
@@ -137,5 +138,14 @@ mod tests {
     fn admin_error_stopped_uses_invalid_state_code() {
         let err = BatcherAdminApiServerImpl::admin_error(AdminError::Stopped);
         assert_eq!(err.code(), -32002);
+    }
+
+    #[test]
+    fn admin_error_invalid_throttle_config_uses_invalid_params_code() {
+        let err = BatcherAdminApiServerImpl::admin_error(AdminError::InvalidThrottleConfig(
+            base_batcher_core::ThrottleConfigError::InvalidMaxIntensity(1.1),
+        ));
+        assert_eq!(err.code(), -32602);
+        assert!(err.message().contains("max_intensity"));
     }
 }

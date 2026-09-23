@@ -2,7 +2,7 @@
 
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{ThrottleConfig, ThrottleInfo, ThrottleStrategy};
+use crate::{ThrottleConfig, ThrottleConfigError, ThrottleInfo, ThrottleStrategy};
 
 /// Capacity of the admin command channel.
 ///
@@ -35,6 +35,9 @@ pub enum AdminError {
     /// The operation needs a running batcher, but it is stopped.
     #[error("batcher is stopped")]
     Stopped,
+    /// A throttle configuration would produce unsafe DA limits.
+    #[error("invalid throttle configuration: {0}")]
+    InvalidThrottleConfig(#[from] ThrottleConfigError),
 }
 
 /// Result type alias for admin operations.
@@ -133,6 +136,7 @@ impl AdminHandle {
         strategy: ThrottleStrategy,
         config: ThrottleConfig,
     ) -> AdminResult<()> {
+        config.validate()?;
         self.send(AdminCommand::SetThrottle { strategy, config }).await
     }
 
@@ -206,5 +210,16 @@ mod tests {
         let (handle, _rx) = AdminHandle::channel();
         let err = handle.set_log_level("debug".to_string()).unwrap_err();
         assert!(matches!(err, AdminError::NotSupported(_)));
+    }
+
+    #[tokio::test]
+    async fn set_throttle_rejects_invalid_config_before_sending_command() {
+        let (handle, mut rx) = AdminHandle::channel();
+        let config = ThrottleConfig { max_intensity: 1.1, ..Default::default() };
+
+        let err = handle.set_throttle(ThrottleStrategy::Linear, config).await.unwrap_err();
+
+        assert!(matches!(err, AdminError::InvalidThrottleConfig(_)));
+        assert!(rx.try_recv().is_err(), "invalid config must not reach the driver");
     }
 }
