@@ -462,7 +462,7 @@ pub struct RollupArgs {
         visible_alias = "proofs.prune-interval",
         value_name = "PROOFS_HISTORY_PRUNE_INTERVAL",
         default_value = "15s",
-        value_parser = humantime::parse_duration
+        value_parser = parse_positive_duration
     )]
     pub proofs_history_prune_interval: Duration,
 
@@ -758,6 +758,16 @@ mod tests {
         let result = CommandParser::<RollupArgs>::try_parse_from([
             "reth",
             "--proofs-history.mdbx.max-read-transaction-duration",
+            "0s",
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_proofs_history_rejects_zero_prune_interval() {
+        let result = CommandParser::<RollupArgs>::try_parse_from([
+            "reth",
+            "--proofs-history.prune-interval",
             "0s",
         ]);
         assert!(result.is_err());
