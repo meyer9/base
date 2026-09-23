@@ -63,7 +63,7 @@ pub async fn get_rolling_block_range(host: &SuccinctHost, range: u64) -> Result<
 }
 
 /// A contiguous range of L2 blocks.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpanBatchRange {
     /// First block in the range.
     pub start: u64,
@@ -74,17 +74,26 @@ pub struct SpanBatchRange {
 /// Split a range of blocks into a list of span batch ranges.
 ///
 /// This is a simple implementation used when the safeDB is not activated on the L2 Node.
-pub fn split_range_basic(start: u64, end: u64, max_range_size: u64) -> Vec<SpanBatchRange> {
+///
+/// # Errors
+///
+/// Returns an error when `max_range_size` is zero. A zero-sized range cannot advance the
+/// cursor and would otherwise make proof planning loop forever.
+pub fn split_range_basic(start: u64, end: u64, max_range_size: u64) -> Result<Vec<SpanBatchRange>> {
+    if max_range_size == 0 {
+        bail!("max range size must be greater than zero");
+    }
+
     let mut ranges = Vec::new();
     let mut current_start = start;
 
     while current_start < end {
-        let current_end = min(current_start + max_range_size, end);
+        let current_end = current_start.saturating_add(max_range_size).min(end);
         ranges.push(SpanBatchRange { start: current_start, end: current_end });
         current_start = current_end;
     }
 
-    ranges
+    Ok(ranges)
 }
 
 /// Split a range of blocks into a list of span batch ranges based on L2 safeHeads.
@@ -101,6 +110,10 @@ pub async fn split_range_based_on_safe_heads(
     l2_end: u64,
     max_range_size: u64,
 ) -> Result<Vec<SpanBatchRange>> {
+    if max_range_size == 0 {
+        bail!("max range size must be greater than zero");
+    }
+
     let data_fetcher = OPSuccinctDataFetcher::default();
 
     // Get the L1 origin of l2_start
@@ -130,13 +143,14 @@ pub async fn split_range_based_on_safe_heads(
                     "optimism_safeHeadAtL1Block",
                     vec![l1_block_hex.into()],
                 )
-                .await
-                .expect("Failed to fetch safe head");
-            result.safe_head.number
+                .await?;
+            Ok::<_, anyhow::Error>(result.safe_head.number)
         })
         .buffered(15)
-        .collect::<HashSet<_>>()
-        .await;
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<HashSet<_>>>()?;
 
     // Collect and sort the safe heads.
     let mut safe_heads: Vec<_> = safe_heads.into_iter().collect();
@@ -145,16 +159,44 @@ pub async fn split_range_based_on_safe_heads(
     // Loop over all of the safe heads and create ranges.
     for safe_head in safe_heads {
         if safe_head > current_l2_start && current_l2_start < l2_end {
-            let mut range_start = current_l2_start;
-            while range_start + max_range_size < min(l2_end, safe_head) {
-                ranges
-                    .push(SpanBatchRange { start: range_start, end: range_start + max_range_size });
-                range_start += max_range_size;
-            }
-            ranges.push(SpanBatchRange { start: range_start, end: min(l2_end, safe_head) });
+            let range_end = min(l2_end, safe_head);
+            ranges.extend(split_range_basic(current_l2_start, range_end, max_range_size)?);
             current_l2_start = safe_head;
         }
     }
 
     Ok(ranges)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SpanBatchRange, split_range_basic};
+
+    #[test]
+    fn split_range_basic_rejects_zero_sized_ranges() {
+        let error = split_range_basic(1, 10, 0).expect_err("zero-sized ranges must be rejected");
+
+        assert_eq!(error.to_string(), "max range size must be greater than zero");
+    }
+
+    #[test]
+    fn split_range_basic_partitions_the_requested_range() {
+        let ranges = split_range_basic(10, 20, 4).expect("positive range size must succeed");
+
+        assert_eq!(
+            ranges,
+            vec![
+                SpanBatchRange { start: 10, end: 14 },
+                SpanBatchRange { start: 14, end: 18 },
+                SpanBatchRange { start: 18, end: 20 },
+            ]
+        );
+    }
+
+    #[test]
+    fn split_range_basic_handles_the_upper_block_number_boundary() {
+        let ranges = split_range_basic(u64::MAX - 2, u64::MAX, 4).expect("range must not overflow");
+
+        assert_eq!(ranges, vec![SpanBatchRange { start: u64::MAX - 2, end: u64::MAX }]);
+    }
 }
