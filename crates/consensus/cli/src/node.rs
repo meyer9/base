@@ -358,6 +358,14 @@ impl ConsensusNodeArgs {
         Ok(config)
     }
 
+    /// Validates that isolated sequencing is only enabled for a sequencer node.
+    pub fn validate_isolated_sequencer(&self) -> eyre::Result<()> {
+        if self.config.sequencer_flags.isolated && !self.config.node_mode.is_sequencer() {
+            eyre::bail!("--sequencer.isolated is only supported in sequencer mode");
+        }
+        Ok(())
+    }
+
     /// Validates the signing-key requirements for the configured sequencer mode.
     pub fn validate_sequencer_key(&self) -> eyre::Result<()> {
         if self.config.node_mode.is_sequencer() {
@@ -455,6 +463,7 @@ impl ConsensusNodeArgs {
         overrides: ConsensusNodeOverrides,
         startup_mode: UpgradeSignalStartupMode,
     ) -> eyre::Result<RollupNode> {
+        self.validate_isolated_sequencer()?;
         self.validate_sequencer_key()?;
         self.validate_shadow_funding()?;
         self.validate_da_batcher_sender_override()?;
@@ -996,6 +1005,25 @@ mod tests {
         );
 
         assert!(args.validate_sequencer_key().is_ok());
+    }
+
+    #[tokio::test]
+    async fn isolated_sequencer_is_rejected_outside_sequencer_mode() {
+        let args = ConsensusNodeArgs::new(
+            ConsensusChainArgs { l2_chain_id: Chain::from(8453_u64) },
+            ConsensusNodeConfigArgs {
+                sequencer_flags: SequencerArgs { isolated: true, ..SequencerArgs::default() },
+                ..default_node_config_args()
+            },
+        );
+        let config = args.load_rollup_config().unwrap();
+
+        let error = args
+            .build_rollup_node_with_overrides(config, ConsensusNodeOverrides::default())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "--sequencer.isolated is only supported in sequencer mode");
     }
 
     #[test]
