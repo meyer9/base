@@ -17,6 +17,7 @@ jsonrpsee = { workspace = true, optional = true }
 
 # Async
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio-util.workspace = true
 
 # Serialization
 serde_json.workspace = true
@@ -32,6 +33,7 @@ tracing.workspace = true
 [dev-dependencies]
 rstest.workspace = true
 chrono.workspace = true
+sqlx = { workspace = true, features = ["postgres"] }
 jsonrpsee = { workspace = true, features = ["http-client"] }
 metrics-util = { workspace = true, features = ["debugging"] }
 base-prover-service-protocol = { workspace = true, features = ["rpc-client"] }

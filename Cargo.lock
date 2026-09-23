@@ -5932,7 +5932,9 @@ dependencies = [
  "metrics-util",
  "rstest",
  "serde_json",
+ "sqlx",
  "tokio",
+ "tokio-util",
  "tracing",
  "uuid",
 ]
@@ -5951,6 +5953,7 @@ dependencies = [
  "reth-node-core",
  "serde",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 

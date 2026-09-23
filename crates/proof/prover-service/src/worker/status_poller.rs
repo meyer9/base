@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use base_prover_service_db::{FailExpiredProofJobs, ProofJob, ProofRequestRepo, RetryOutcome};
 use tokio::time::sleep;
+use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, error, info, info_span, warn};
 
 use crate::metrics;
@@ -65,17 +66,29 @@ impl StatusPoller {
         }
     }
 
-    /// Run the status poller in a loop
-    pub async fn run(&self) {
+    /// Run the status poller until shutdown is requested.
+    pub async fn run(&self, cancel: CancellationToken) {
         info!(poll_interval_secs = self.poll_interval_secs, "Starting status poller");
 
         loop {
-            if let Err(e) = self.poll_once().await {
-                error!(error = %e, "Status poll failed");
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => break,
+                result = self.poll_once() => {
+                    if let Err(error) = result {
+                        error!(error = %error, "Status poll failed");
+                    }
+                }
             }
 
-            sleep(Duration::from_secs(self.poll_interval_secs)).await;
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => break,
+                () = sleep(Duration::from_secs(self.poll_interval_secs)) => {}
+            }
         }
+
+        info!("Status poller stopped");
     }
 
     async fn poll_once(&self) -> anyhow::Result<()> {
@@ -176,5 +189,36 @@ impl StatusPoller {
             metrics::inc_worker_jobs_failed(reason, proof_type);
             metrics::record_terminal_proof_job(metrics::PROOF_STATUS_FAILED, job);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use base_prover_service_db::ProofRequestRepo;
+    use sqlx::postgres::PgPoolOptions;
+    use tokio_util::sync::CancellationToken;
+
+    use super::{StatusPoller, WorkerQueueConfig};
+
+    #[tokio::test]
+    async fn cancellation_stops_poller_before_database_work() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/prover_service")
+            .expect("lazy pool should accept a PostgreSQL URL");
+        let poller = StatusPoller::new(
+            ProofRequestRepo::new(pool),
+            3600,
+            10,
+            3,
+            WorkerQueueConfig::default(),
+        );
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        tokio::time::timeout(Duration::from_millis(100), poller.run(cancel))
+            .await
+            .expect("cancelled poller should stop without querying the database");
     }
 }

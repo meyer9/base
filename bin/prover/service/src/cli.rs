@@ -12,6 +12,7 @@ use clap::Parser;
 use eyre::eyre;
 use jsonrpsee::server::{Server, ServerConfig as JsonRpcServerConfig};
 use reth_node_core::args::TraceArgs;
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 base_cli_utils::define_log_args!("BASE_PROVER_SERVICE");
@@ -129,16 +130,16 @@ impl Cli {
             base_cli_utils::register_version_metrics!();
             base_prover_service::ProverMetrics::init();
         })?;
-        RuntimeManager::new().run_until_ctrl_c(async move {
+        RuntimeManager::new().run_until_shutdown(|cancel| async move {
             LogConfig::from(logging).init_with_trace_args(&traces, &[])?;
-            args.run().await
+            args.run(cancel).await
         })
     }
 }
 
 impl ServiceArgs {
     /// Runs the prover service.
-    async fn run(self) -> eyre::Result<()> {
+    async fn run(self, cancel: CancellationToken) -> eyre::Result<()> {
         self.validate_config()?;
 
         info!("initializing database connection");
@@ -167,8 +168,9 @@ impl ServiceArgs {
             self.max_proof_retries,
             server_config.worker_queue,
         );
+        let status_cancel = cancel.clone();
         let mut status_handle = tokio::spawn(async move {
-            status_poller.run().await;
+            status_poller.run(status_cancel).await;
         });
 
         let prover_server = ProverServiceServer::new(repo, server_config);
@@ -217,19 +219,36 @@ impl ServiceArgs {
         let worker_server_handle = worker_rpc_server.start(worker_rpc_module);
 
         let result: eyre::Result<()> = tokio::select! {
+            () = cancel.cancelled() => {
+                info!("shutdown requested; stopping prover service");
+                requester_server_handle
+                    .stop()
+                    .map_err(|error| eyre!("failed to stop requester RPC server: {error}"))?;
+                worker_server_handle
+                    .stop()
+                    .map_err(|error| eyre!("failed to stop worker RPC server: {error}"))?;
+                (&mut status_handle)
+                    .await
+                    .map_err(|error| eyre!("status poller panicked during shutdown: {error}"))?;
+                requester_server_handle.stopped().await;
+                worker_server_handle.stopped().await;
+                Ok(())
+            },
             res = &mut status_handle => match res {
                 Ok(()) => Err(eyre!("status poller exited unexpectedly")),
-                Err(e) => Err(eyre!("status poller panicked: {e}")),
+                Err(error) => Err(eyre!("status poller panicked: {error}")),
             },
-            () = requester_server_handle.stopped() => {
+            () = requester_server_handle.clone().stopped() => {
                 Err(eyre!("requester RPC server stopped unexpectedly"))
             },
-            () = worker_server_handle.stopped() => {
+            () = worker_server_handle.clone().stopped() => {
                 Err(eyre!("worker RPC server stopped unexpectedly"))
             },
         };
 
-        status_handle.abort();
+        if !cancel.is_cancelled() {
+            status_handle.abort();
+        }
 
         result
     }
