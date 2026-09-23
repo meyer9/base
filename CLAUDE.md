@@ -19,13 +19,13 @@
 
 ## Product Direction
 
-- Read [`docs/RECENT_FEATURE_MAP.md`](docs/RECENT_FEATURE_MAP.md) before proposing or implementing product, protocol, builder, Flashblocks, proof, or operator work. It defines the active roadmap, deprecation commitments, and PR decision rules.
+- Read [`docs/FEATURE_MAP.md`](docs/FEATURE_MAP.md) before proposing or implementing product, protocol, builder, Flashblocks, proof, or operator work. It defines the active roadmap, deprecation commitments, and PR decision rules.
 - Base is moving from Flashblocks to 200 ms blocks. Follow the feature map for the migration and removal of the Flashblock builder by October 31, 2026 after 200 ms blocks are activated.
 - For legacy Optimism/pre-Holocene, upgrade, derivation, execution, and operator work, use the feature map to favor removing obsolete special cases and making supported state transitions, ownership, observability, and hardfork planning explicit.
 
 ## Autonomous Agent Roles
 
-- Role definitions live in [`agents/README.md`](agents/README.md) and [`agents/`](agents/). Read the matching role after `AGENTS.md` and [`docs/RECENT_FEATURE_MAP.md`](docs/RECENT_FEATURE_MAP.md); the latter remains the source of product constraints and deprecations.
+- Role definitions live in [`agents/README.md`](agents/README.md) and [`agents/`](agents/). Read the matching role after `AGENTS.md` and [`docs/FEATURE_MAP.md`](docs/FEATURE_MAP.md); the latter remains the source of product constraints and deprecations.
 - Use `simplifier`, `integration_refactorer`, `performance_engineer`, or `test_breaker` only for a substantive validated code improvement.
 - For an autonomous improvement run, create and maintain a `/goal` to open a substantive, validated draft PR. Reject weak candidates and continue to another bounded opportunity rather than ending on a null result; never satisfy the goal with a report, documentation-only change, cosmetic PR, or unvalidated claim.
 - A larger coherent change may use `gh stack` only when it decomposes into independently reviewable, buildable, and validated PRs. Each stacked PR must have a real contract and useful standalone review value; do not stack inseparable work or manufacture multiple PRs.

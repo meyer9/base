@@ -1,7 +1,7 @@
 # Autonomous agent roles
 
 Use these roles only for bounded work that can produce a substantive, validated
-improvement. Read `AGENTS.md` and `docs/RECENT_FEATURE_MAP.md` first.
+improvement. Read `AGENTS.md` and `docs/FEATURE_MAP.md` first.
 
 | Role | Use for | Do not use for |
 | --- | --- | --- |
