@@ -54,7 +54,7 @@ impl<L2: L2Provider, P: ProofRequesterProvider> std::fmt::Debug for DisputeProof
 }
 
 impl<L2: L2Provider, P: ProofRequesterProvider> DisputeProofManager<L2, P> {
-    /// Maximum number of times a failed proof job will be retried before being dropped.
+    /// Maximum number of failed proof re-submission attempts before the session is dropped.
     pub const MAX_PROOF_RETRIES: u32 = 3;
 
     /// Maximum number of terminally ignored games retained to avoid rediscovery churn.
@@ -547,7 +547,7 @@ impl<L2: L2Provider, P: ProofRequesterProvider> DisputeProofManager<L2, P> {
         let retry_count = pending.retry_count;
         let invalid_index = pending.invalid_index;
 
-        if retry_count > Self::MAX_PROOF_RETRIES {
+        if retry_count >= Self::MAX_PROOF_RETRIES {
             warn!(
                 game = %game_address,
                 retry_count = retry_count,
@@ -813,6 +813,23 @@ mod tests {
         assert_eq!(manager.ignored_games_len(), TestManager::MAX_IGNORED_GAMES);
         assert!(!manager.is_ignored(addr(0)));
         assert!(manager.is_ignored(addr(TestManager::MAX_IGNORED_GAMES as u64)));
+    }
+
+    #[tokio::test]
+    async fn exhausted_proof_retries_drop_without_another_prover_request() {
+        let (mut manager, _, proof_requester) = manager_with_tx_manager(MockTxManager::new(Ok(
+            receipt_with_status(true, B256::ZERO),
+        )));
+        insert_ready_proof(&mut manager);
+
+        let pending = manager.pending_proofs.get_mut(&addr(0)).expect("pending proof should exist");
+        pending.retry_count = TestManager::MAX_PROOF_RETRIES;
+        pending.phase = ProofPhase::NeedsRetry;
+
+        manager.handle_proof_retry(addr(0)).await.unwrap();
+
+        assert!(!manager.pending_proofs.contains_key(&addr(0)));
+        assert!(proof_requester.state.lock().unwrap().prove_block_range_log.is_empty());
     }
 
     #[tokio::test]
