@@ -265,43 +265,47 @@ where
                             L1WatcherActorError::DerivationClientError(e)
                         })?;
 
-                        // For each log, attempt to construct a [`SystemConfigLog`].
-                        // Build the [`SystemConfigUpdate`] from the log.
-                        // If the update is an Unsafe block signer update, send the address
-                        // to the block signer sender.
-                        let filter_address = self.rollup_config.l1_system_config_address;
-                        let filter = Filter::new()
-                            .address(filter_address)
-                            .select(derivation_block.hash);
+                        // System-config logs only feed the network actor's unsafe block signer.
+                        // Isolated sequencers have no network actor, so avoid making their liveness
+                        // depend on an L1 query whose result has no consumer.
+                        if let Some(block_signer_sender) = &self.block_signer_sender {
+                            let filter_address = self.rollup_config.l1_system_config_address;
+                            let filter = Filter::new()
+                                .address(filter_address)
+                                .select(derivation_block.hash);
 
-                        // Log requests are retried with bounded backoff. If all attempts time out
-                        // or otherwise fail, the actor returns an error instead of hanging.
-                        let Some(logs) = LogRetrier::fetch_logs_with_retry(
-                            &self.l1_provider,
-                            filter,
-                            &cancel,
-                            derivation_block,
-                            INITIAL_BACKOFF,
-                            MAX_BACKOFF,
-                        )
-                        .await?
-                        else {
-                            return Ok(());
-                        };
-                        let ecotone_active =
-                            self.rollup_config.is_ecotone_active(derivation_block.timestamp);
-                        for log in logs {
-                            let sys_cfg_log = SystemConfigLog::new(log.into(), ecotone_active);
-                            if let Ok(SystemConfigUpdate::UnsafeBlockSigner(UnsafeBlockSignerUpdate { unsafe_block_signer })) = sys_cfg_log.build() {
-                                info!(
-                                    target: "l1_watcher",
-                                    "Unsafe block signer update: {unsafe_block_signer}"
-                                );
-                                if let Some(ref block_signer_sender) = self.block_signer_sender && let Err(e) = block_signer_sender.send(unsafe_block_signer).await {
-                                    error!(
+                            // Log requests are retried with bounded backoff. If all attempts time
+                            // out or otherwise fail, the actor returns an error instead of hanging.
+                            let Some(logs) = LogRetrier::fetch_logs_with_retry(
+                                &self.l1_provider,
+                                filter,
+                                &cancel,
+                                derivation_block,
+                                INITIAL_BACKOFF,
+                                MAX_BACKOFF,
+                            )
+                            .await?
+                            else {
+                                return Ok(());
+                            };
+                            let ecotone_active =
+                                self.rollup_config.is_ecotone_active(derivation_block.timestamp);
+                            for log in logs {
+                                let sys_cfg_log = SystemConfigLog::new(log.into(), ecotone_active);
+                                if let Ok(SystemConfigUpdate::UnsafeBlockSigner(
+                                    UnsafeBlockSignerUpdate { unsafe_block_signer },
+                                )) = sys_cfg_log.build()
+                                {
+                                    info!(
                                         target: "l1_watcher",
-                                        "Error sending unsafe block signer update: {e}"
+                                        "Unsafe block signer update: {unsafe_block_signer}"
                                     );
+                                    if let Err(e) = block_signer_sender.send(unsafe_block_signer).await {
+                                        error!(
+                                            target: "l1_watcher",
+                                            "Error sending unsafe block signer update: {e}"
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -629,6 +633,34 @@ mod tests {
     // ---------------------------------------------------------------------------
     // Verifier L1 confs tests
     // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn skips_system_config_logs_without_a_signer_receiver() {
+        let fetcher = MockFetcher::always_fail();
+        let call_count = Arc::clone(&fetcher.call_count);
+        let derivation_client = RecordingDerivationClient::default();
+        let (l1_head_tx, _) = watch::channel(None);
+        let l1_head_number = Arc::new(AtomicU64::new(0));
+        let head = block_at(100);
+        let actor = L1WatcherActor::new(
+            Arc::new(RollupConfig::default()),
+            fetcher,
+            l1_head_tx,
+            derivation_client.clone(),
+            None,
+            CancellationToken::new(),
+            Box::pin(futures::stream::iter([head])),
+            Box::pin(futures::stream::pending()),
+            0,
+            l1_head_number,
+        );
+
+        let result = actor.start(()).await;
+
+        assert!(matches!(result, Err(L1WatcherActorError::StreamEnded)));
+        assert_eq!(derivation_client.sent_heads(), vec![head]);
+        assert_eq!(call_count.load(Ordering::SeqCst), 0);
+    }
 
     #[tokio::test]
     async fn zero_confs_forwards_real_head_to_derivation() {
