@@ -23,6 +23,52 @@ pub struct ThrottleConfig {
     pub tx_size_upper_limit: u64,
 }
 
+/// Errors returned when a throttle configuration would produce unsafe DA limits.
+#[derive(Debug, thiserror::Error)]
+pub enum ThrottleConfigError {
+    /// The configured throttle intensity is not a finite fraction.
+    #[error("max_intensity must be finite and within 0.0..=1.0, got {0}")]
+    InvalidMaxIntensity(f64),
+    /// The configured block-size range is inverted.
+    #[error("block_size_lower_limit {lower} exceeds block_size_upper_limit {upper}")]
+    InvalidBlockSizeRange {
+        /// Configured lower block-size limit.
+        lower: u64,
+        /// Configured upper block-size limit.
+        upper: u64,
+    },
+    /// The configured transaction-size range is inverted.
+    #[error("tx_size_lower_limit {lower} exceeds tx_size_upper_limit {upper}")]
+    InvalidTransactionSizeRange {
+        /// Configured lower transaction-size limit.
+        lower: u64,
+        /// Configured upper transaction-size limit.
+        upper: u64,
+    },
+}
+
+impl ThrottleConfig {
+    /// Validates that interpolation can only reduce DA limits from their configured upper bounds.
+    pub fn validate(&self) -> Result<(), ThrottleConfigError> {
+        if !self.max_intensity.is_finite() || !(0.0..=1.0).contains(&self.max_intensity) {
+            return Err(ThrottleConfigError::InvalidMaxIntensity(self.max_intensity));
+        }
+        if self.block_size_lower_limit > self.block_size_upper_limit {
+            return Err(ThrottleConfigError::InvalidBlockSizeRange {
+                lower: self.block_size_lower_limit,
+                upper: self.block_size_upper_limit,
+            });
+        }
+        if self.tx_size_lower_limit > self.tx_size_upper_limit {
+            return Err(ThrottleConfigError::InvalidTransactionSizeRange {
+                lower: self.tx_size_lower_limit,
+                upper: self.tx_size_upper_limit,
+            });
+        }
+        Ok(())
+    }
+}
+
 impl Default for ThrottleConfig {
     fn default() -> Self {
         Self {
@@ -345,5 +391,26 @@ mod tests {
     fn strategy_parse_rejects_invalid() {
         assert!("foo".parse::<ThrottleStrategy>().is_err());
         assert!("".parse::<ThrottleStrategy>().is_err());
+    }
+    #[test]
+    fn config_validation_rejects_limits_that_expand_under_throttle() {
+        let invalid_intensity = ThrottleConfig { max_intensity: 1.1, ..Default::default() };
+        assert!(matches!(
+            invalid_intensity.validate(),
+            Err(ThrottleConfigError::InvalidMaxIntensity(1.1))
+        ));
+
+        let invalid_block_range =
+            ThrottleConfig { block_size_lower_limit: 130_001, ..Default::default() };
+        assert!(matches!(
+            invalid_block_range.validate(),
+            Err(ThrottleConfigError::InvalidBlockSizeRange { .. })
+        ));
+
+        let invalid_tx_range = ThrottleConfig { tx_size_lower_limit: 20_001, ..Default::default() };
+        assert!(matches!(
+            invalid_tx_range.validate(),
+            Err(ThrottleConfigError::InvalidTransactionSizeRange { .. })
+        ));
     }
 }

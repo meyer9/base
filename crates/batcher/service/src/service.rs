@@ -372,6 +372,9 @@ impl BatcherService {
         let cancellation = runtime.token().clone();
         let mut background_tasks = Vec::new();
         self.config.encoder_config.validate()?;
+        if let Some(throttle) = &self.config.throttle {
+            throttle.validate()?;
+        }
 
         if self.config.poll_interval.is_zero() {
             eyre::bail!("poll_interval must be greater than zero");
