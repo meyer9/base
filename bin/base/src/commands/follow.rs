@@ -57,11 +57,10 @@ impl FollowCommand {
         let consensus_chain = resolved_chain.consensus_chain_args();
         let mut execution = execution;
         let follow_config: ConsensusFollowNodeConfigArgs = follow.into();
-        execution
-            .standard
-            .rollup_args
-            .upgrade_signal_l1_rpc
-            .apply_default_from(&follow_config.l1_rpc_args.l1_eth_rpc);
+        execution.standard.apply_integrated_upgrade_signal_defaults(
+            execution_chain.chain().id(),
+            &follow_config.l1_rpc_args.l1_eth_rpc,
+        );
         let follow_args = ConsensusFollowNodeArgs::new(consensus_chain, follow_config);
         let mut rollup_config = follow_args.load_rollup_config()?;
 

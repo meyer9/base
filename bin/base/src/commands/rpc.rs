@@ -54,16 +54,10 @@ impl RpcCommand {
         let consensus_chain = resolved_chain.consensus_chain_args();
         let mut execution = execution;
         let mut consensus_config: ConsensusNodeConfigArgs = consensus.into();
-        execution
-            .standard
-            .rollup_args
-            .upgrade_signal
-            .apply_chain_default(execution_chain.chain().id());
-        execution
-            .standard
-            .rollup_args
-            .upgrade_signal_l1_rpc
-            .apply_default_from(&consensus_config.l1_rpc_args.l1_eth_rpc);
+        execution.standard.apply_integrated_upgrade_signal_defaults(
+            execution_chain.chain().id(),
+            &consensus_config.l1_rpc_args.l1_eth_rpc,
+        );
         consensus_config.upgrade_signal = execution.standard.rollup_args.upgrade_signal.clone();
         let consensus_args = ConsensusNodeArgs::new(consensus_chain, consensus_config);
         let mut rollup_config = consensus_args.load_rollup_config()?;
