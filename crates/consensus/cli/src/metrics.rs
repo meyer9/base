@@ -21,9 +21,6 @@ impl CliMetrics {
     /// The P2P Scoring level (disabled if "off").
     pub const P2P_PEER_SCORING_LEVEL: &'static str = "base_node_peer_scoring_level";
 
-    /// Whether P2P Topic Scoring is enabled.
-    pub const P2P_TOPIC_SCORING_ENABLED: &'static str = "base_node_topic_scoring_enabled";
-
     /// Whether P2P banning is enabled.
     pub const P2P_BANNING_ENABLED: &'static str = "base_node_banning_enabled";
 
@@ -91,7 +88,6 @@ impl CliMetrics {
             Self::IDENTIFIER,
             &[
                 (Self::P2P_PEER_SCORING_LEVEL, p2p.scoring.to_string()),
-                (Self::P2P_TOPIC_SCORING_ENABLED, p2p.topic_scoring.to_string()),
                 (Self::P2P_BANNING_ENABLED, p2p.ban_enabled.to_string()),
                 (Self::P2P_PEER_REDIALING, p2p.peer_redial.unwrap_or(0).to_string()),
                 (Self::P2P_FLOOD_PUBLISH, p2p.gossip_flood_publish.to_string()),

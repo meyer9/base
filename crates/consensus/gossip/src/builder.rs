@@ -14,7 +14,7 @@ use tokio::sync::watch::{self};
 use crate::{
     Behaviour, BlockHandler, ConnectionLimitsConfig, DEFAULT_MAX_ESTABLISHED_CONNECTIONS,
     DEFAULT_MAX_IDENTIFY_PEERSTORE_PEERS, GaterConfig, GossipDriver, GossipDriverBuilderError,
-    GossipDriverConfig, Handler,
+    GossipDriverConfig,
 };
 
 /// A builder for the [`GossipDriver`].
@@ -43,8 +43,6 @@ pub struct GossipDriverBuilder {
     connection_limits_config: ConnectionLimitsConfig,
     /// Maximum number of peers to retain identify metadata for.
     max_identify_peerstore_peers: NonZeroUsize,
-    /// Topic scoring. Disabled by default.
-    topic_scoring: bool,
 }
 
 impl GossipDriverBuilder {
@@ -69,7 +67,6 @@ impl GossipDriverBuilder {
             ),
             max_identify_peerstore_peers: DEFAULT_MAX_IDENTIFY_PEERSTORE_PEERS,
             rollup_config,
-            topic_scoring: false,
         }
     }
 
@@ -95,13 +92,6 @@ impl GossipDriverBuilder {
     /// This is used to determine the topic to publish to.
     pub const fn with_rollup_config(mut self, rollup_config: RollupConfig) -> Self {
         self.rollup_config = rollup_config;
-        self
-    }
-
-    /// Sets topic scoring.
-    /// This is disabled by default.
-    pub const fn with_topic_scoring(mut self, topic_scoring: bool) -> Self {
-        self.topic_scoring = topic_scoring;
         self
     }
 
@@ -217,7 +207,7 @@ impl GossipDriverBuilder {
             }
             Some(level) => {
                 let params = level
-                    .to_params(handler.topics(), self.topic_scoring, block_time)
+                    .to_params(block_time)
                     .unwrap_or_default();
                 match behaviour.gossipsub.with_peer_score(params, PeerScoreLevel::thresholds()) {
                     Ok(_) => debug!(target: "scoring", "Peer scoring enabled successfully"),

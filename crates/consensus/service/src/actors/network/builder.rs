@@ -51,7 +51,6 @@ impl From<NetworkConfig> for NetworkBuilder {
         .with_gossip_config(config.gossip_config)
         .with_peer_scoring(config.scoring)
         .with_peer_monitoring(config.monitor_peers)
-        .with_topic_scoring(config.topic_scoring)
         .with_gater_config(config.gater_config)
         .with_connection_limits_config(config.connection_limits_config)
         .with_max_identify_peerstore_peers(config.max_identify_peerstore_peers)
@@ -129,11 +128,6 @@ impl NetworkBuilder {
     /// Sets the peer scoring based on the given [`PeerScoreLevel`].
     pub fn with_peer_scoring(self, level: PeerScoreLevel) -> Self {
         Self { gossip: self.gossip.with_peer_scoring(level), ..self }
-    }
-
-    /// Sets topic scoring for the [`GossipDriverBuilder`].
-    pub fn with_topic_scoring(self, topic_scoring: bool) -> Self {
-        Self { gossip: self.gossip.with_topic_scoring(topic_scoring), ..self }
     }
 
     /// Sets the peer monitoring for the [`GossipDriverBuilder`].

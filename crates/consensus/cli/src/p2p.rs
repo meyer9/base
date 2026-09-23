@@ -250,23 +250,6 @@ pub struct P2PNetworkArgs {
     )]
     pub bootnodes_file: Option<PathBuf>,
 
-    /// Optionally enable topic scoring.
-    ///
-    /// Topic scoring is a mechanism to score peers based on their behavior in the gossip network.
-    /// Historically, topic scoring was only enabled for the v1 topic on the Base p2p network
-    /// in the reference node. This was a silent bug, and topic scoring is actively being
-    /// [phased out of the reference node][out].
-    ///
-    /// This flag is only presented for backwards compatibility and debugging purposes.
-    ///
-    /// [out]: https://github.com/ethereum-optimism/optimism/pull/15719
-    #[arg(
-        long = "p2p.topic-scoring",
-        default_value = "false",
-        env = "BASE_NODE_P2P_TOPIC_SCORING"
-    )]
-    pub topic_scoring: bool,
-
     /// An optional unsafe block signer address.
     ///
     /// By default, this is fetched from the built-in chain config using the
@@ -737,7 +720,6 @@ impl P2PArgs {
             scoring: self.scoring,
             monitor_peers,
             bootstore,
-            topic_scoring: self.topic_scoring,
             gater_config: GaterConfig {
                 peer_redialing: self.peer_redial,
                 dial_period: Duration::from_secs(60 * self.redial_period),
@@ -1358,6 +1340,15 @@ mod tests {
             .unwrap();
 
         assert_eq!(config.gater_config.pending_dial_timeout, Duration::from_secs(45));
+    }
+
+    #[test]
+    fn test_p2p_args_reject_removed_topic_scoring_flag() {
+        let err = MockCommand::try_parse_from(["test", "--p2p.topic-scoring"])
+            .expect_err("removed topic scoring flag should fail")
+            .to_string();
+
+        assert!(err.contains("unexpected argument '--p2p.topic-scoring'"));
     }
 
     #[test]
