@@ -36,7 +36,7 @@ pub enum BootStoreFile {
         /// The l2 chain ID.
         chain_id: u64,
     },
-    /// A custom bootstore path is used. This must be a valid path to a file.
+    /// A custom bootstore path is used. Its parent directories are created when needed.
     Custom(PathBuf),
 }
 
@@ -54,6 +54,11 @@ impl TryInto<File> for BootStoreFile {
     /// file type.
     fn try_into(self) -> Result<File, std::io::Error> {
         let path = TryInto::<PathBuf>::try_into(self)?;
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
+        }
         File::options().read(true).write(true).create(true).truncate(false).open(path)
     }
 }
@@ -206,5 +211,37 @@ impl BootStore {
             debug!(target: "bootstore", "Boot store exceeded maximum peers, removing oldest peer");
             self.peers.pop_front();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::*;
+
+    #[test]
+    fn custom_bootstore_creates_missing_parent_directories() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after Unix epoch")
+            .as_nanos();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(".tmp")
+            .join(format!("bootstore-{unique}"));
+        let path = root.join("nested").join("bootstore.json");
+
+        let store: BootStore = BootStoreFile::Custom(path.clone())
+            .try_into()
+            .expect("custom bootstore should create its parent directories");
+
+        assert!(store.file.is_some());
+        assert!(path.is_file());
+
+        drop(store);
+        fs::remove_dir_all(root).expect("test bootstore directory should be removed");
     }
 }
