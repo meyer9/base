@@ -1,4 +1,4 @@
-//! Integration tests for [`BatchDriver`] lifecycle: source exhaustion, flush, and drain.
+//! Integration tests for [`BatchDriver`] lifecycle: source errors, flush, and drain.
 
 use std::{
     sync::{Arc, Mutex},
@@ -15,25 +15,22 @@ use base_batcher_core::{
     },
 };
 use base_batcher_encoder::{ChannelLimit, StepError, SubmissionId};
-use base_batcher_source::{ChannelBlockSource, L2BlockEvent, test_utils::InMemoryBlockSource};
+use base_batcher_source::{ChannelBlockSource, L2BlockEvent, SourceError};
 use base_runtime::{
     Cancellation, Clock, Spawner,
     deterministic::{Config, Runner},
 };
 
-/// When the block source returns `SourceError::Exhausted`, the driver must
-/// treat it as a graceful shutdown signal: close the current channel,
-/// drain in-flight submissions within the timeout, then exit cleanly.
+/// Closing the L2 source is fatal: a batcher cannot continue safely without ordered unsafe
+/// blocks, so the driver returns the source error instead of treating closure as shutdown.
 #[test]
-fn test_source_exhaustion_shuts_down_driver_gracefully() {
+fn test_block_source_closed_is_fatal() {
     Runner::start(Config::seeded(0), |ctx| async move {
-        let recorded = Arc::new(Mutex::new(Recorded::default()));
-        let pipeline = TrackingPipeline::new(Arc::clone(&recorded));
-
+        let (source, source_tx) = ChannelBlockSource::new();
         let driver = BatchDriver::new_without_derivation_status(
             ctx.clone(),
-            pipeline,
-            InMemoryBlockSource::new(), // empty → Exhausted immediately
+            TrackingPipeline::new(Arc::new(Mutex::new(Recorded::default()))),
+            source,
             ImmediateConfirmTxManager { l1_block: 1 },
             BatchDriverConfig {
                 inbox: Address::ZERO,
@@ -44,17 +41,12 @@ fn test_source_exhaustion_shuts_down_driver_gracefully() {
             DaThrottle::new(ThrottleController::noop(), Arc::new(NoopThrottleClient)),
             PendingL1HeadSource,
         );
-
         let handle = ctx.spawn(driver.run());
-        ctx.sleep(Duration::from_millis(50)).await;
+
+        drop(source_tx);
 
         let result = handle.await.unwrap();
-        assert!(result.is_ok(), "driver must exit cleanly when source exhausts");
-        assert_eq!(
-            recorded.lock().unwrap().flush_count,
-            1,
-            "flush must be called once on source exhaustion shutdown"
-        );
+        assert!(matches!(result, Err(BatchDriverError::Source(SourceError::Closed))));
     });
 }
 

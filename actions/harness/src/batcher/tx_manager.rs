@@ -314,13 +314,10 @@ impl L1MinerTxManager {
     /// receivers.
     ///
     /// On a `current_thread` tokio runtime (the default for `#[tokio::test]`) a
-    /// single yield is sufficient: [`InMemoryBlockSource::next`] and
-    /// [`send_async`] both complete without suspending, so the driver runs the
-    /// full encoding and submission loop in one turn before sticking on
-    /// `in_flight.next().await`.
+    /// single yield is sufficient for the driver to process queued source events, call
+    /// [`send_async`], and suspend waiting on the oneshot receivers.
     ///
     /// [`send_async`]: L1MinerTxManager::send_async
-    /// [`InMemoryBlockSource::next`]: base_batcher_source::test_utils::InMemoryBlockSource
     pub fn mine_block(&self, l1: &mut L1Miner) -> u64 {
         self.stage_n_to_l1(l1, usize::MAX);
         let block = l1.mine_block().clone();
