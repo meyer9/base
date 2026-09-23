@@ -1,14 +1,9 @@
 //! `base reth` subcommand group: execution-layer maintenance utilities.
 
-use std::sync::Arc;
-
-use base_execution_chainspec::BaseChainSpec;
 use base_execution_cli::{
     chainspec::BaseChainSpecParser,
     commands::{GenesisOutputRootCommand, init_state, p2p},
 };
-use base_execution_consensus::BaseBeaconConsensus;
-use base_execution_evm::BaseExecutorProvider;
 use base_node_core::BaseNode;
 use clap::{Parser, Subcommand};
 use reth_cli_commands::{config_cmd, db, dump_genesis, init_cmd, prune, re_execute, stage};
@@ -92,7 +87,7 @@ impl RethSubcommand {
             Self::Stage(command) => {
                 let runner = CliRunner::try_default_runtime()?;
                 runner.run_command_until_exit(|ctx| {
-                    command.execute::<BaseNode, _>(ctx, Self::base_components)
+                    command.execute::<BaseNode, _>(ctx, BaseNode::maintenance_components)
                 })
             }
             Self::P2P(command) => {
@@ -110,14 +105,10 @@ impl RethSubcommand {
             Self::ReExecute(command) => {
                 let runner = CliRunner::try_default_runtime()?;
                 let runtime = runner.runtime();
-                runner.run_until_ctrl_c(command.execute::<BaseNode>(Self::base_components, runtime))
+                runner.run_until_ctrl_c(
+                    command.execute::<BaseNode>(BaseNode::maintenance_components, runtime),
+                )
             }
         }
-    }
-
-    pub(crate) fn base_components(
-        spec: Arc<BaseChainSpec>,
-    ) -> (BaseExecutorProvider, Arc<BaseBeaconConsensus>) {
-        (BaseExecutorProvider::base(Arc::clone(&spec)), Arc::new(BaseBeaconConsensus::new(spec)))
     }
 }
