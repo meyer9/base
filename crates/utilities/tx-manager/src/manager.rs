@@ -57,7 +57,7 @@ use alloy_transport::TransportError;
 use backon::{ConstantBuilder, Retryable};
 use base_runtime::{Runtime, RuntimeTimeout, TokioRuntime};
 use futures::StreamExt;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, error, info, warn};
 
 use crate::{
@@ -177,6 +177,8 @@ pub struct SimpleTxManager<P, R = TokioRuntime> {
     closed: Arc<AtomicBool>,
     /// Metrics collector for transaction lifecycle events.
     metrics: Arc<dyn TxMetrics>,
+    /// Notifies active send and receipt-polling tasks that shutdown was requested.
+    shutdown: watch::Sender<()>,
 }
 
 impl<P> SimpleTxManager<P, TokioRuntime>
@@ -307,6 +309,7 @@ where
             chain_id,
             closed: Arc::new(AtomicBool::new(false)),
             metrics,
+            shutdown: watch::channel(()).0,
         })
     }
 
@@ -344,11 +347,11 @@ where
     ///
     /// After calling `close()`, any subsequent call to [`prepare`](Self::prepare)
     /// will immediately return `Err(TxManagerError::ChannelClosed)`.
-    /// Background tasks spawned by [`send_async`](Self::send_async) and
-    /// receipt polling tasks will also observe the shutdown and exit
-    /// gracefully, since `closed` is shared via [`Arc`].
+    /// Background send and receipt-polling tasks are also interrupted promptly,
+    /// including while they are waiting for the next retry or receipt-poll interval.
     pub fn close(&self) {
         self.closed.store(true, Ordering::Release);
+        self.shutdown.send_replace(());
     }
 
     /// Returns `true` if the manager has been closed via [`close`](Self::close).
@@ -1098,6 +1101,8 @@ where
         send_state: &Arc<SendState>,
         nonce_override: Option<u64>,
     ) -> SendResponse {
+        let mut shutdown = self.shutdown.subscribe();
+
         // Initial transaction preparation. prepare() is NOT cancellation-safe,
         // so it runs to completion before entering the select loop.
         // The returned PreparedTx carries the actual on-wire fees, eliminating
@@ -1166,6 +1171,7 @@ where
             // outside the select block.
             tokio::select! {
                 biased;
+                _ = shutdown.changed() => return Err(TxManagerError::ChannelClosed),
                 result = receipt_rx.recv() => {
                     match result {
                         Some(receipt) => {
@@ -1535,14 +1541,21 @@ where
         receipt_tx: mpsc::Sender<TransactionReceipt>,
     ) {
         let manager = self.clone();
+        let mut shutdown = self.shutdown.subscribe();
         self.runtime.spawn(async move {
             debug!(tx_hash = %tx_hash, "starting receipt polling");
 
-            // Stop polling once the receiver is dropped. Nobody can consume the receipt then.
-            let receipt = tokio::select! {
-                biased;
-                () = receipt_tx.closed() => None,
-                receipt = manager.wait_mined_for_tx(&send_state, tx_hash) => receipt,
+            // Stop polling once the receiver is dropped or the manager shuts down. Nobody can
+            // consume a receipt after either transition.
+            let receipt = if manager.is_closed() {
+                None
+            } else {
+                tokio::select! {
+                    biased;
+                    _ = shutdown.changed() => None,
+                    () = receipt_tx.closed() => None,
+                    receipt = manager.wait_mined_for_tx(&send_state, tx_hash) => receipt,
+                }
             };
             if let Some(receipt) = receipt {
                 let _ = receipt_tx.send(receipt).await;
@@ -2068,6 +2081,7 @@ mod tests {
                 chain_id: 1,
                 closed: Arc::new(AtomicBool::new(false)),
                 metrics: Arc::new(NoopTxMetrics),
+                shutdown: watch::channel(()).0,
             };
 
             let receipt = manager.wait_mined_for_tx(&send_state, B256::with_last_byte(1)).await;
@@ -2190,6 +2204,7 @@ mod tests {
                 chain_id: 1,
                 closed: Arc::new(AtomicBool::new(false)),
                 metrics: Arc::new(NoopTxMetrics),
+                shutdown: watch::channel(()).0,
             };
             let send_state = Arc::new(SendState::new(3).expect("send state should be valid"));
             let (receipt_tx, receipt_rx) = mpsc::channel(1);
@@ -2203,6 +2218,59 @@ mod tests {
 
             ctx.sleep(Duration::from_secs(10)).await;
             assert_eq!(asserter.read_q().len(), unused_responses);
+        });
+    }
+
+    /// Closing the manager interrupts a receipt poller instead of leaving it asleep until the
+    /// configured receipt interval elapses.
+    #[test]
+    fn receipt_polling_stops_promptly_when_manager_closes() {
+        Runner::start(Config::seeded(0), |ctx| async move {
+            let tx_hash = B256::with_last_byte(1);
+            let (receipt, block) = mined_receipt(tx_hash, 10);
+            let asserter = Asserter::new();
+            for _ in 0..8 {
+                asserter.push_success(&10u64);
+                asserter.push_success(&Some(&receipt));
+                asserter.push_success(&Some(&block));
+            }
+            let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
+            let config = TxManagerConfig {
+                num_confirmations: 5,
+                receipt_query_interval: Duration::from_secs(30),
+                confirmation_timeout: Duration::from_secs(300),
+                network_timeout: Duration::from_secs(30),
+                ..TxManagerConfig::default()
+            };
+            let nonce_manager = NonceManager::with_runtime(
+                ctx.clone(),
+                provider.clone(),
+                Address::ZERO,
+                config.network_timeout,
+            );
+            let manager = SimpleTxManager {
+                provider,
+                runtime: ctx.clone(),
+                wallet: EthereumWallet::from(PrivateKeySigner::random()),
+                config,
+                nonce_manager,
+                chain_id: 1,
+                closed: Arc::new(AtomicBool::new(false)),
+                metrics: Arc::new(NoopTxMetrics),
+                shutdown: watch::channel(()).0,
+            };
+            let send_state = Arc::new(SendState::new(3).expect("send state should be valid"));
+            let (receipt_tx, mut receipt_rx) = mpsc::channel(1);
+
+            manager.spawn_wait_for_tx(send_state, tx_hash, receipt_tx);
+            ctx.sleep(Duration::from_secs(1)).await;
+            let requests_before_close = asserter.read_q().len();
+
+            manager.close();
+            ctx.sleep(Duration::from_secs(1)).await;
+
+            assert_eq!(asserter.read_q().len(), requests_before_close);
+            assert!(matches!(receipt_rx.try_recv(), Err(mpsc::error::TryRecvError::Disconnected)));
         });
     }
 
