@@ -2,6 +2,7 @@
 
 use std::{
     collections::{BTreeMap, BinaryHeap, HashSet},
+    ops::Bound,
     sync::Arc,
 };
 
@@ -326,23 +327,26 @@ impl<T: BasePooledTx> TwoDNoncePool<T> {
             self.hashes.remove(&replaced_hash);
         }
 
-        let pending_len_after = lane.consecutive_pending_len();
-        let state = if lane
-            .next_nonce
-            .checked_add(pending_len_after as u64)
-            .is_none_or(|boundary| nonce < boundary)
-        {
+        let pending_boundary = lane.next_nonce.checked_add(pending_len_before as u64);
+        let state = if pending_boundary.is_none_or(|boundary| nonce <= boundary) {
             AddedTransactionState::Pending
         } else {
             AddedTransactionState::Queued(QueuedReason::NonceGap)
         };
 
-        let promoted = if matches!(state, AddedTransactionState::Pending) {
-            lane.consecutive_pending_transactions()
-                .skip(pending_len_before)
-                .filter(|candidate| *candidate.hash() != hash)
-                .cloned()
-                .collect()
+        let promoted = if replaced.is_none() && pending_boundary == Some(nonce) {
+            let mut promoted = Vec::new();
+            let mut expected_nonce = nonce.checked_add(1);
+            for (candidate_nonce, candidate) in
+                lane.transactions.range((Bound::Excluded(nonce), Bound::Unbounded))
+            {
+                if Some(*candidate_nonce) != expected_nonce {
+                    break;
+                }
+                promoted.push(Arc::clone(candidate));
+                expected_nonce = candidate_nonce.checked_add(1);
+            }
+            promoted
         } else {
             Vec::new()
         };
@@ -1017,6 +1021,8 @@ mod tests {
             outcome.replaced.as_ref().map(|transaction| *transaction.hash()),
             Some(original_hash)
         );
+        assert!(matches!(outcome.outcome.state, AddedTransactionState::Pending));
+        assert!(outcome.promoted.is_empty());
         assert!(pool.get(&original_hash).is_none());
         assert!(pool.get(&replacement_hash).is_some());
         assert_eq!(pool.all_transactions().len(), 1);
@@ -1074,7 +1080,11 @@ mod tests {
         pool.insert_validated(first, 0).unwrap();
         pool.insert_validated(second, 0).unwrap();
         pool.insert_validated(third, 0).unwrap();
-        pool.insert_validated(gap, 0).unwrap();
+        let queued = pool.insert_validated(gap, 0).unwrap();
+        assert!(matches!(
+            queued.outcome.state,
+            AddedTransactionState::Queued(QueuedReason::NonceGap)
+        ));
 
         let (pending, queued) = pool.pending_and_queued_txn_count();
         assert_eq!((pending, queued), (3, 1));
