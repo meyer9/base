@@ -376,6 +376,9 @@ impl BatcherService {
         if self.config.poll_interval.is_zero() {
             eyre::bail!("poll_interval must be greater than zero");
         }
+        if self.config.max_pending_transactions == 0 {
+            eyre::bail!("max_pending_transactions must be greater than zero");
+        }
         if self.config.stopped && self.config.admin_addr.is_none() {
             eyre::bail!(
                 "--stopped requires --admin-port: the batcher would start stopped with no way to \
@@ -754,6 +757,19 @@ mod tests {
 
     fn test_retry() -> RetryConfig {
         RetryConfig::unbounded(Duration::from_millis(1), Duration::from_millis(1))
+    }
+
+    #[tokio::test]
+    async fn setup_rejects_zero_max_pending_transactions_before_connecting() {
+        let mut config = BatcherConfig::default();
+        config.max_pending_transactions = 0;
+
+        let error = BatcherService::new(config)
+            .setup(TokioRuntime::new())
+            .await
+            .expect_err("zero max pending transactions must be rejected before RPC setup");
+
+        assert!(error.to_string().contains("max_pending_transactions must be greater than zero"));
     }
 
     #[tokio::test]
