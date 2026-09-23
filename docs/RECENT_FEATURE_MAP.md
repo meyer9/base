@@ -35,23 +35,13 @@ explicitly asks for it.
 | Proof production and disputes | Make proving and recovery dependable in production. | Reproducible flows, bounded recovery, useful metrics, and failure/restart coverage. |
 | Node and operator experience | Make supported flows easier to run and diagnose. | Faster focused feedback, reliable devnet/system tests, snapshots/recovery checks, and actionable observability. |
 
-## Sequencing and Flashblocks: deprecation plan
+## Flashblocks to 200 ms blocks
 
-Flashblocks are being deprecated. Do not add new Flashblocks features, APIs,
-configuration, metrics, tests, or abstractions unless they are needed to keep
-an existing supported deployment safe during retirement.
-
-The Flashblock builder is deprecated and is scheduled for removal **by October
-31, 2026**, after 200 ms blocks are activated. Work in this area should:
-
-1. prepare the 200 ms block path for safe activation;
-2. migrate callers and operators away from the Flashblock builder; or
-3. delete Flashblock-specific code, flags, tests, metrics, and documentation
-   once the replacement path is proven.
-
-Do **not** optimize, expand, or create new dependencies on the Flashblock
-builder. Treat a proposal that needs new Flashblock behavior as out of
-roadmap unless it is an explicit retirement-blocking fix.
+Base is moving from Flashblocks to 200 ms blocks. The Flashblock builder is
+scheduled for removal by **October 31, 2026**, after 200 ms blocks are
+activated. Sequencing work should make the 200 ms path ready to operate, move
+callers and operators to it, and remove the replaced Flashblocks code, flags,
+tests, metrics, and documentation once migration is proven.
 
 ## Legacy OP and transition-system convergence
 
@@ -85,8 +75,8 @@ Before implementing a change, state in the PR description:
 1. **User or operator outcome:** Who benefits, what currently fails or costs
    time/resources, and what observable behavior will improve?
 2. **Roadmap fit:** Which product constraint, deprecation commitment, or
-   supported path it respects. If it touches sequencing or Flashblocks, explain
-   how it supports the retirement plan.
+   supported path it respects. If it touches sequencing, explain how it supports
+   the move to 200 ms blocks.
 3. **Surface reduction:** What old path, duplicate logic, flag, workflow, or
    ongoing operational cost can be removed or avoided?
 4. **Evidence:** The focused test, E2E scenario, benchmark, or operational
