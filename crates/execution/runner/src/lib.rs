@@ -22,11 +22,7 @@ pub use service::{DefaultPayloadServiceBuilder, PayloadServiceBuilder};
 mod types;
 pub use types::{BaseComponentsBuilder, BaseNodeBuilder, BaseNodeTypes, BaseProvider};
 
-mod node;
-pub use node::BaseNode;
-
-mod add_ons;
-pub use add_ons::{BaseAddOns, BaseAddOnsBuilder};
+pub use base_node_core::{BaseAddOns, BaseAddOnsBuilder, BaseNode};
 
 #[cfg(feature = "test-utils")]
 pub mod test_utils;

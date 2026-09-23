@@ -7,7 +7,7 @@ use reth_node_builder::{
 };
 use reth_provider::providers::BlockchainProvider;
 
-use crate::node::BaseNode;
+use base_node_core::BaseNode;
 
 /// Alias for the Base node type adapter used by the runner.
 pub type BaseNodeTypes = FullNodeTypesAdapter<BaseNode, DatabaseEnv, BaseProvider>;

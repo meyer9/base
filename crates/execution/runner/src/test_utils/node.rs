@@ -21,7 +21,7 @@ use reth_provider::providers::BlockchainProvider;
 use reth_tasks::Runtime;
 
 use crate::{
-    BaseNodeExtension, BaseProvider, NodeHooks, node::BaseNode, test_utils::engine::EngineApi,
+    BaseNode, BaseNodeExtension, BaseProvider, NodeHooks, test_utils::engine::EngineApi,
 };
 
 /// Convenience alias for the local blockchain provider type.

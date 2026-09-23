@@ -2,14 +2,12 @@
 
 use base_node_core::{
     BaseConsensusBuilder, BaseExecutorBuilder, BaseNetworkBuilder,
+    BaseNode,
     node::{BasePayloadServiceBuilder, BasePoolBuilder},
 };
 use reth_node_builder::{NodeComponentsBuilder, components::ComponentsBuilder};
 
-use crate::{
-    node::BaseNode,
-    types::{BaseComponentsBuilder, BaseNodeTypes},
-};
+use crate::types::{BaseComponentsBuilder, BaseNodeTypes};
 
 /// Trait for customizing the payload service used by the node.
 ///
