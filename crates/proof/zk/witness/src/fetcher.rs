@@ -251,14 +251,22 @@ impl OPSuccinctDataFetcher {
         }
     }
 
-    /// Get the aggregate block statistics for a range of blocks exclusive of the start block.
+    /// Get the aggregate block statistics for a non-empty range of blocks exclusive of the start
+    /// block.
     ///
     /// When proving a range with Succinct, we are proving the transition from the block hash
     /// of the start block to the block hash of the end block. This means that we don't expend
     /// resources to "prove" the start block. This is why the start block is not included in the
     /// range for which we fetch block data.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `start >= end`, because there is no L2 transition to fetch. This
+    /// also prevents an overflowing `u64::MAX + 1` range cursor from issuing unrelated RPC calls.
     pub async fn get_l2_block_data_range(&self, start: u64, end: u64) -> Result<Vec<BlockInfo>> {
-        use futures::stream::{self, StreamExt};
+        if start >= end {
+            bail!("L2 block data range start ({start}) must be less than end ({end})");
+        }
 
         let block_data = stream::iter(start + 1..=end)
             .map(|block_number| async move {
@@ -884,10 +892,44 @@ mod tests {
         }
     }
 
+    fn fetcher() -> OPSuccinctDataFetcher {
+        let rpc_config = rpc_config(None, None);
+        let l1_provider =
+            Arc::new(ProviderBuilder::default().connect_http(rpc_config.l1_rpc.clone()));
+        let l2_provider =
+            Arc::new(ProviderBuilder::default().connect_http(rpc_config.l2_rpc.clone()));
+
+        OPSuccinctDataFetcher {
+            rpc_config,
+            l1_provider,
+            l2_provider,
+            rollup_config: None,
+            rollup_config_path: None,
+            l1_config_path: None,
+        }
+    }
+
     #[test]
     fn explicit_config_dirs_win_over_defaults() {
         let rpc = rpc_config(Some(PathBuf::from("/tmp/l1")), Some(PathBuf::from("/tmp/l2")));
         assert_eq!(rpc.l1_config_directory(), PathBuf::from("/tmp/l1"));
         assert_eq!(rpc.l2_config_directory(), PathBuf::from("/tmp/l2"));
+    }
+
+    #[tokio::test]
+    async fn block_data_range_rejects_empty_and_overflowing_ranges() {
+        let fetcher = fetcher();
+
+        for (start, end) in [(42, 42), (43, 42), (u64::MAX, u64::MAX)] {
+            let error = fetcher
+                .get_l2_block_data_range(start, end)
+                .await
+                .expect_err("empty or reversed L2 ranges must be rejected before RPC calls");
+
+            assert_eq!(
+                error.to_string(),
+                format!("L2 block data range start ({start}) must be less than end ({end})")
+            );
+        }
     }
 }
