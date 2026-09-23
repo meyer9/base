@@ -65,7 +65,9 @@ where
             return Err(BaseProofsStorageError::NoBlocksFound);
         };
 
-        let parent_block_number = block.number() - 1;
+        let parent_block_number = block.number().checked_sub(1).ok_or(
+            BaseProofsStorageError::UnknownParent,
+        )?;
         if parent_block_number < earliest {
             return Err(BaseProofsStorageError::UnknownParent);
         }
@@ -358,7 +360,9 @@ where
         let latest_in_session =
             session.get_latest_block_number()?.ok_or(BaseProofsStorageError::NoBlocksFound)?.0;
 
-        let parent_block_number = block.number() - 1;
+        let parent_block_number = block.number().checked_sub(1).ok_or(
+            BaseProofsStorageError::UnknownParent,
+        )?;
         if parent_block_number < earliest {
             return Err(BaseProofsStorageError::UnknownParent);
         }
