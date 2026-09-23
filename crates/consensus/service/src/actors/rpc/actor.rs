@@ -165,6 +165,7 @@ where
             self.engine_rpc_client.clone(),
             l1_watcher_queries,
             Arc::clone(&self.safe_db_reader),
+            self.config.http_timeout,
         );
         modules.merge(rollup_rpc.into_rpc())?;
 
