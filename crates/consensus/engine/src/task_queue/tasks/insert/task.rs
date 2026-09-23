@@ -214,8 +214,8 @@ impl<EngineClient_: EngineClient> InsertTask<EngineClient_> {
             return false;
         }
 
-        if new_unsafe_ref.block_info.number == unsafe_head.block_info.number.saturating_add(1)
-            && new_unsafe_ref.block_info.parent_hash != unsafe_head.block_info.hash
+        if new_unsafe_ref.block_info.number != unsafe_head.block_info.number.saturating_add(1)
+            || new_unsafe_ref.block_info.parent_hash != unsafe_head.block_info.hash
         {
             info!(
                 target: "engine",
@@ -224,7 +224,7 @@ impl<EngineClient_: EngineClient> InsertTask<EngineClient_> {
                 parent_hash = %new_unsafe_ref.block_info.parent_hash,
                 unsafe_hash = %unsafe_head.block_info.hash,
                 unsafe_number = unsafe_head.block_info.number,
-                "Skipping unsafe payload that does not build onto current unsafe head"
+                "Skipping unsafe payload that is not a direct child of the current unsafe head"
             );
             return false;
         }
@@ -614,7 +614,7 @@ mod tests {
     #[tokio::test]
     async fn unsafe_payload_insert_advances_only_unsafe_head() {
         let client = test_client();
-        let payload = bedrock_payload(2);
+        let payload = bedrock_payload(1);
         let envelope = BaseExecutionPayloadEnvelope {
             parent_beacon_block_root: None,
             execution_payload: payload,
@@ -630,7 +630,7 @@ mod tests {
         .await
         .expect("unsafe payload should be inserted");
 
-        assert_eq!(state.sync_state.unsafe_head().block_info.number, 2);
+        assert_eq!(state.sync_state.unsafe_head().block_info.number, 1);
         assert_eq!(state.sync_state.local_safe_head().block_info.number, 0);
         assert_eq!(state.sync_state.safe_head().block_info.number, 0);
     }
@@ -731,7 +731,9 @@ mod tests {
     #[tokio::test]
     async fn denim_schedule_mismatch_is_rejected_before_new_payload() {
         let client = test_client();
-        let mut state = TestEngineStateBuilder::new().build();
+        let mut state = TestEngineStateBuilder::new()
+            .with_unsafe_head(l2_block_info(1, B256::ZERO, B256::ZERO))
+            .build();
 
         for (payload, expected_error) in [
             (
@@ -768,7 +770,9 @@ mod tests {
     #[tokio::test]
     async fn local_denim_schedule_mismatch_is_returned_to_caller() {
         let client = test_client();
-        let mut state = TestEngineStateBuilder::new().build();
+        let mut state = TestEngineStateBuilder::new()
+            .with_unsafe_head(l2_block_info(1, B256::ZERO, B256::ZERO))
+            .build();
         let envelope = BaseExecutionPayloadEnvelope {
             parent_beacon_block_root: None,
             execution_payload: denim_payload(2, 3, 200),
@@ -829,6 +833,32 @@ mod tests {
         assert!(
             client.last_new_payload_v2().await.is_none(),
             "wrong-parent unsafe payload should not be sent to engine_newPayload"
+        );
+        assert_eq!(state.sync_state.unsafe_head(), current_unsafe);
+    }
+
+    #[tokio::test]
+    async fn gapped_unsafe_payload_is_dropped_before_new_payload() {
+        let client = test_client();
+        let current_unsafe = l2_block_info(4, B256::with_last_byte(4), B256::with_last_byte(3));
+        let mut state = TestEngineStateBuilder::new().with_unsafe_head(current_unsafe).build();
+        let envelope = BaseExecutionPayloadEnvelope {
+            parent_beacon_block_root: None,
+            execution_payload: bedrock_payload_with_parent(6, B256::with_last_byte(5)),
+        };
+
+        InsertTask::unsafe_payload(
+            Arc::clone(&client),
+            Arc::new(base_common_genesis::RollupConfig::default()),
+            envelope,
+        )
+        .execute(&mut state)
+        .await
+        .expect("gapped unsafe payload should be dropped without retrying");
+
+        assert!(
+            client.last_new_payload_v2().await.is_none(),
+            "gapped unsafe payload should not be sent to engine_newPayload"
         );
         assert_eq!(state.sync_state.unsafe_head(), current_unsafe);
     }
