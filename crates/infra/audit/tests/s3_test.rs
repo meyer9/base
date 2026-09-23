@@ -93,3 +93,49 @@ async fn system_test_nonexistent_data() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn system_test_lifecycle_events_share_received_bundle_history() -> anyhow::Result<()> {
+    let harness = TestHarness::new().await?;
+    let writer = S3EventReaderWriter::new(harness.s3_client.clone(), harness.bucket_name.clone());
+
+    let bundle = create_bundle_from_txn_data();
+    let bundle_id = Uuid::new_v5(&Uuid::NAMESPACE_OID, bundle.bundle_hash().as_slice());
+    let bundle_hash = bundle.bundle_hash();
+    writer
+        .archive_event(create_test_event(
+            &format!("received-{bundle_hash}"),
+            1234567890,
+            BundleEvent::Received { bundle_id, bundle: Box::new(bundle) },
+        ))
+        .await?;
+    writer
+        .archive_event(create_test_event(
+            &format!("cancelled-{bundle_id}"),
+            1234567891,
+            BundleEvent::Cancelled { bundle_id },
+        ))
+        .await?;
+
+    let history = writer
+        .get_bundle_history(&bundle_hash.to_string())
+        .await?
+        .expect("received bundle history should exist");
+    assert_eq!(history.history.len(), 2, "received and cancelled events must share history");
+    assert!(history
+        .history
+        .iter()
+        .any(|event| matches!(event, audit_archiver_lib::BundleHistoryEvent::Received { .. })));
+    assert!(history
+        .history
+        .iter()
+        .any(|event| matches!(event, audit_archiver_lib::BundleHistoryEvent::Cancelled { .. })));
+
+    let history_by_id = writer
+        .get_bundle_history(&bundle_id.to_string())
+        .await?
+        .expect("bundle ID should resolve to received bundle history");
+    assert_eq!(history_by_id.history.len(), 2);
+
+    Ok(())
+}

@@ -12,10 +12,11 @@ use aws_sdk_s3::{
     },
     primitives::ByteStream,
 };
-use base_bundles::{AcceptedBundle, BundleExtensions, RejectedTransaction};
+use base_bundles::{AcceptedBundle, RejectedTransaction};
 use futures::future;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 use crate::{
     metrics::Metrics,
@@ -28,6 +29,8 @@ use crate::{
 pub enum S3Key {
     /// Key for transaction lookups by hash.
     TransactionByHash(TxHash),
+    /// Key that resolves a producer bundle ID to its content-addressed history prefix.
+    BundleById(Uuid),
     /// Key for rejected transaction storage.
     Rejected(u64, TxHash),
 }
@@ -36,6 +39,7 @@ impl fmt::Display for S3Key {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::TransactionByHash(hash) => write!(f, "transactions/by_hash/{hash}"),
+            Self::BundleById(bundle_id) => write!(f, "bundles/by_id/{bundle_id}"),
             Self::Rejected(block_number, tx_hash) => {
                 write!(f, "rejected/{block_number}/{tx_hash}")
             }
@@ -241,8 +245,8 @@ impl S3EventReaderWriter {
     /// Writes a single event as a standalone S3 object using `If-None-Match: *`.
     ///
     /// If the object already exists (412), another writer succeeded first — return Ok.
-    async fn write_event(&self, event: &Event) -> Result<()> {
-        let s3_key = event.event.s3_event_key();
+    async fn write_event(&self, event: &Event, bundle_key: &str) -> Result<()> {
+        let s3_key = format!("bundles/{bundle_key}/{}", event.event.generate_event_key());
         let history_event = to_history_event(event);
         let content = serde_json::to_string(&history_event)?;
 
@@ -273,6 +277,66 @@ impl S3EventReaderWriter {
                 Err(anyhow::anyhow!("failed to write event to S3: {e}"))
             }
         }
+    }
+
+    /// Records the content-addressed history prefix for a producer bundle ID.
+    ///
+    /// Lifecycle events only carry `bundle_id`, while received events also carry the bundle
+    /// contents needed to derive the stable bundle hash. Keeping this mapping lets every event
+    /// for a bundle use the same history prefix.
+    async fn write_bundle_id_mapping(&self, bundle_id: Uuid, bundle_key: &str) -> Result<()> {
+        let mapping_key = S3Key::BundleById(bundle_id).to_string();
+        let (existing, _) = self.get_object_with_etag::<String>(&mapping_key).await?;
+        if let Some(existing) = existing {
+            if existing == bundle_key {
+                return Ok(());
+            }
+            anyhow::bail!(
+                "bundle ID {bundle_id} is already mapped to a different bundle history prefix"
+            );
+        }
+
+        let content = serde_json::to_string(bundle_key)?;
+        let request = self
+            .s3_client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(&mapping_key)
+            .body(ByteStream::from(content.into_bytes()))
+            .if_none_match("*");
+
+        match request.send().await {
+            Ok(_) => Ok(()),
+            Err(error) if Self::is_conditional_write_conflict(&error) => {
+                let (existing, _) = self.get_object_with_etag::<String>(&mapping_key).await?;
+                match existing {
+                    Some(existing) if existing == bundle_key => Ok(()),
+                    Some(_) => anyhow::bail!(
+                        "bundle ID {bundle_id} is already mapped to a different bundle history prefix"
+                    ),
+                    None => Err(anyhow::anyhow!(
+                        "bundle ID mapping for {bundle_id} disappeared after a conditional write conflict"
+                    )),
+                }
+            }
+            Err(error) => {
+                Err(anyhow::anyhow!("failed to write bundle ID mapping for {bundle_id}: {error}"))
+            }
+        }
+    }
+
+    /// Resolves the stable history prefix for a lifecycle event.
+    async fn bundle_key_for_event(&self, event: &BundleEvent) -> Result<String> {
+        if let Some(bundle_hash) = event.bundle_hash() {
+            let bundle_key = bundle_hash.to_string();
+            self.write_bundle_id_mapping(event.bundle_id(), &bundle_key).await?;
+            return Ok(bundle_key);
+        }
+
+        let mapping_key = S3Key::BundleById(event.bundle_id()).to_string();
+        self.get_object_with_etag::<String>(&mapping_key).await?.0.ok_or_else(|| {
+            anyhow::anyhow!("bundle ID {} has no received-event mapping", event.bundle_id())
+        })
     }
 
     async fn update_transaction_by_hash_index(
@@ -430,17 +494,11 @@ impl S3EventReaderWriter {
 #[async_trait]
 impl EventWriter for S3EventReaderWriter {
     async fn archive_event(&self, event: Event) -> Result<()> {
-        let bundle_key = match &event.event {
-            BundleEvent::Received { bundle, .. } => format!("{}", bundle.bundle_hash()),
-            // TODO: support other event types using bundle hash
-            _ => {
-                anyhow::bail!("archive_event only supports Received events")
-            }
-        };
+        let bundle_key = self.bundle_key_for_event(&event.event).await?;
         let transaction_ids = event.event.transaction_ids();
 
         let event_start = Instant::now();
-        let event_future = self.write_event(&event);
+        let event_future = self.write_event(&event, &bundle_key);
 
         let tx_start = Instant::now();
         let tx_futures: Vec<_> = transaction_ids
@@ -463,6 +521,15 @@ impl EventWriter for S3EventReaderWriter {
 #[async_trait]
 impl BundleEventS3Reader for S3EventReaderWriter {
     async fn get_bundle_history(&self, bundle_key: &str) -> Result<Option<BundleHistory>> {
+        let bundle_key = match Uuid::parse_str(bundle_key) {
+            Ok(bundle_id) => {
+                let mapping_key = S3Key::BundleById(bundle_id).to_string();
+                let (mapped_key, _) = self.get_object_with_etag::<String>(&mapping_key).await?;
+                let Some(mapped_key) = mapped_key else { return Ok(None) };
+                mapped_key
+            }
+            Err(_) => bundle_key.to_owned(),
+        };
         let prefix = format!("bundles/{bundle_key}/");
         let list_output: ListObjectsV2Output =
             self.s3_client.list_objects_v2().bucket(&self.bucket).prefix(&prefix).send().await?;
