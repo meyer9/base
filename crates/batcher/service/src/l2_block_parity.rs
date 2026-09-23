@@ -314,10 +314,19 @@ where
 
         for number in self.next_block..=last_block {
             match self.compare_block(number).await {
-                Ok(result) => {
+                Ok(result @ L2BlockParityResult::Match { .. })
+                | Ok(result @ L2BlockParityResult::Mismatch { .. }) => {
                     let next_block = result.number().saturating_add(1);
                     self.record_result(result, &mut stats);
                     self.next_block = next_block;
+                }
+                Ok(result @ L2BlockParityResult::Missing { .. }) => {
+                    self.record_result(result, &mut stats);
+                    warn!(
+                        l2_block = %number,
+                        "derived L2 block parity data missing; will retry"
+                    );
+                    break;
                 }
                 Err(error) => {
                     L2BlockParityMetrics::fetch_errors_total(L2BlockParityMetrics::SCOPE_BLOCK)
@@ -423,7 +432,7 @@ where
                     l2_block = %number,
                     sequencer_missing = %sequencer_missing,
                     validator_missing = %validator_missing,
-                    "derived L2 block parity skipped missing block"
+                    "derived L2 block parity block unavailable"
                 );
             }
         }
@@ -525,6 +534,37 @@ mod tests {
         assert_eq!(stats.checked, 2);
         assert_eq!(stats.matches, 2);
         assert_eq!(stats.mismatches, 0);
+        assert_eq!(monitor.next_block, 3);
+    }
+
+    /// A block reported by an unsafe-head RPC can still be temporarily unavailable from the
+    /// block RPC. Keep the cursor at that gap so a later pass actually compares it instead of
+    /// silently declaring later blocks caught up.
+    #[tokio::test]
+    async fn process_once_retries_a_missing_block_before_advancing() {
+        let sequencer = Arc::new(Mutex::new(MockL2BlockProvider::new(
+            2,
+            [snapshot(1, 1, &[10]), snapshot(2, 2, &[20])],
+        )));
+        let validator = Arc::new(Mutex::new(MockL2BlockProvider::new(2, [snapshot(2, 2, &[20])])));
+        let config = L2BlockParityMonitorConfig {
+            start_block: 1,
+            max_blocks_per_tick: 10,
+            ..L2BlockParityMonitorConfig::new(1, Duration::from_secs(1))
+        };
+        let mut monitor = L2BlockParityMonitor::new(sequencer, Arc::clone(&validator), config);
+
+        let first_pass = monitor.process_once().await.unwrap();
+
+        assert_eq!(first_pass, L2BlockParityStats { missing_blocks: 1, ..Default::default() });
+        assert_eq!(monitor.next_block, 1, "missing data must remain the next comparison");
+
+        validator.lock().await.blocks.insert(1, snapshot(1, 1, &[10]));
+
+        let recovered_pass = monitor.process_once().await.unwrap();
+
+        assert_eq!(recovered_pass.checked, 2);
+        assert_eq!(recovered_pass.matches, 2);
         assert_eq!(monitor.next_block, 3);
     }
 
