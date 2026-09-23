@@ -65,4 +65,5 @@ metrics = [
 alloy-rpc-types-eth.workspace = true
 tokio = { workspace = true, features = ["macros", "test-util"] }
 httpmock.workspace = true
+metrics-util = { workspace = true, features = ["debugging"] }
 serde_json = { workspace = true, features = ["std"] }
