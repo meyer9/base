@@ -30,6 +30,7 @@
 - For an autonomous improvement run, create and maintain a `/goal` to open a substantive, validated draft PR. Reject weak candidates and continue to another bounded opportunity rather than ending on a null result; never satisfy the goal with a report, documentation-only change, cosmetic PR, or unvalidated claim.
 - A larger coherent change may use `gh stack` only when it decomposes into independently reviewable, buildable, and validated PRs. Each stacked PR must have a real contract and useful standalone review value; do not stack inseparable work or manufacture multiple PRs.
 - Create every PR with a verified non-empty body file, not an interactive or omitted description. Before reporting the PR URL, confirm its body contains Outcome, Preserved contract, Validation, and Scope headings.
+- Autonomous improvement PRs must meet the production-quality bar in `agents/README.md`: prefer coherent end-to-end fixes, meaningful ownership/deletion refactors, or supported feature completion over isolated easy validation guards, and do not treat formatting or an unrun test attempt as sufficient validation.
 
 ## Documentation and Lints
 
