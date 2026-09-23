@@ -1,6 +1,6 @@
 //! This module contains the [`BatchProvider`] stage.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 use core::fmt::Debug;
 
 use alloy_eips::BlockNumHash;
@@ -14,39 +14,38 @@ use crate::{
     OriginProvider, PipelineError, PipelineResult, StageReset,
 };
 
-/// The [`BatchProvider`] stage is a mux between the [`BatchQueue`] and [`BatchValidator`] stages.
+/// The [`BatchProvider`] stage owns the derivation rule selected by the current L1 origin.
 ///
-/// Rules:
-/// When Holocene is not active, the [`BatchQueue`] is used.
-/// When Holocene is active, the [`BatchValidator`] is used.
-///
-/// When transitioning between the two stages, the mux will reset the active stage, but
-/// retain `l1_blocks`.
+/// Before Holocene it owns a [`BatchQueue`]; from Holocene onward it owns a
+/// [`BatchValidator`]. The state is explicit so an origin reorganization can only move between
+/// the supported derivation rules and never leave two rules active at once.
 #[derive(Debug)]
 pub struct BatchProvider<P, F>
 where
     P: NextBatchProvider + OriginAdvancer + OriginProvider + StageReset + Debug,
     F: L2ChainProvider + Clone + Debug,
 {
-    /// The rollup configuration.
+    /// The rollup configuration that selects the supported derivation rule.
     pub cfg: Arc<RollupConfig>,
-    /// The L2 chain provider.
+    /// The L2 chain provider shared by each supported derivation rule.
     pub provider: F,
-    /// The previous stage of the derivation pipeline.
-    ///
-    /// If this is set to [`None`], the multiplexer has been activated and the active stage
-    /// owns the previous stage.
-    ///
-    /// Must be [`None`] if `batch_queue` or `batch_validator` is [`Some`].
-    pub prev: Option<P>,
-    /// The batch queue stage of the provider.
-    ///
-    /// Must be [`None`] if `prev` or `batch_validator` is [`Some`].
-    pub batch_queue: Option<BatchQueue<P, F>>,
-    /// The batch validator stage of the provider.
-    ///
-    /// Must be [`None`] if `prev` or `batch_queue` is [`Some`].
-    pub batch_validator: Option<BatchValidator<P, F>>,
+    /// The current derivation-rule owner.
+    pub state: Option<BatchProviderState<P, F>>,
+}
+
+/// The derivation rule owned by a [`BatchProvider`].
+#[derive(Debug)]
+pub enum BatchProviderState<P, F>
+where
+    P: NextBatchProvider + OriginAdvancer + OriginProvider + StageReset + Debug,
+    F: L2ChainProvider + Clone + Debug,
+{
+    /// The upstream stage has not yet been assigned a derivation rule.
+    Pending(P),
+    /// The pre-Holocene queue owns batch ordering and empty-batch derivation.
+    Queue(BatchQueue<P, F>),
+    /// The Holocene validator owns strict batch validation and empty-batch derivation.
+    Validator(BatchValidator<P, F>),
 }
 
 impl<P, F> BatchProvider<P, F>
@@ -56,41 +55,45 @@ where
 {
     /// Creates a new [`BatchProvider`] with the given configuration and previous stage.
     pub const fn new(cfg: Arc<RollupConfig>, prev: P, provider: F) -> Self {
-        Self { cfg, provider, prev: Some(prev), batch_queue: None, batch_validator: None }
+        Self { cfg, provider, state: Some(BatchProviderState::Pending(prev)) }
     }
 
-    /// Attempts to update the active stage of the mux.
+    /// Updates the derivation-rule owner for the current L1 origin.
     pub fn attempt_update(&mut self) -> PipelineResult<()> {
         let origin = self.origin().ok_or(PipelineError::MissingOrigin.crit())?;
-        if let Some(prev) = self.prev.take() {
-            // On the first call to `attempt_update`, we need to determine the active stage to
-            // initialize the mux with.
-            if self.cfg.is_holocene_active(origin.timestamp) {
-                self.batch_validator =
-                    Some(BatchValidator::new(Arc::clone(&self.cfg), prev, self.provider.clone()));
-            } else {
-                self.batch_queue =
-                    Some(BatchQueue::new(Arc::clone(&self.cfg), prev, self.provider.clone()));
+        let holocene_active = self.cfg.is_holocene_active(origin.timestamp);
+        let state = self.state.take().expect("batch provider state is restored after every update");
+        self.state = Some(match state {
+            BatchProviderState::Pending(prev) if holocene_active => BatchProviderState::Validator(
+                BatchValidator::new(Arc::clone(&self.cfg), prev, self.provider.clone()),
+            ),
+            BatchProviderState::Pending(prev) => BatchProviderState::Queue(BatchQueue::new(
+                Arc::clone(&self.cfg),
+                prev,
+                self.provider.clone(),
+            )),
+            BatchProviderState::Queue(batch_queue) if holocene_active => {
+                let mut validator = BatchValidator::new(
+                    Arc::clone(&self.cfg),
+                    batch_queue.prev,
+                    self.provider.clone(),
+                );
+                // Retain the canonical L1 window while the ownership rule changes.
+                validator.origin = batch_queue.origin;
+                validator.l1_blocks = batch_queue.l1_blocks;
+                BatchProviderState::Validator(validator)
             }
-        } else if self.batch_queue.is_some() && self.cfg.is_holocene_active(origin.timestamp) {
-            // If the batch queue is active and Holocene is also active, transition to the batch
-            // validator.
-            let batch_queue = self.batch_queue.take().expect("Must have batch queue");
-            let mut bv =
-                BatchValidator::new(Arc::clone(&self.cfg), batch_queue.prev, self.provider.clone());
-            bv.l1_blocks = batch_queue.l1_blocks;
-            bv.origin = batch_queue.origin;
-            self.batch_validator = Some(bv);
-        } else if self.batch_validator.is_some() && !self.cfg.is_holocene_active(origin.timestamp) {
-            // If the batch validator is active, and Holocene is not active, it indicates an L1
-            // reorg around Holocene activation. Transition back to the batch queue
-            // until Holocene re-activates.
-            let batch_validator = self.batch_validator.take().expect("Must have batch validator");
-            let mut bq =
-                BatchQueue::new(Arc::clone(&self.cfg), batch_validator.prev, self.provider.clone());
-            bq.l1_blocks = batch_validator.l1_blocks;
-            self.batch_queue = Some(bq);
-        }
+            BatchProviderState::Validator(batch_validator) if !holocene_active => {
+                // An L1 reorganization crossed activation. Do not carry strict-validator work into
+                // the legacy queue; the queue rebuilds its window from the reorged upstream origin.
+                BatchProviderState::Queue(BatchQueue::new(
+                    Arc::clone(&self.cfg),
+                    batch_validator.prev,
+                    self.provider.clone(),
+                ))
+            }
+            state => state,
+        });
         Ok(())
     }
 }
@@ -103,13 +106,10 @@ where
 {
     async fn advance_origin(&mut self) -> PipelineResult<()> {
         self.attempt_update()?;
-
-        if let Some(batch_validator) = self.batch_validator.as_mut() {
-            batch_validator.advance_origin().await
-        } else if let Some(batch_queue) = self.batch_queue.as_mut() {
-            batch_queue.advance_origin().await
-        } else {
-            Err(PipelineError::NotEnoughData.temp())
+        match self.state.as_mut().expect("batch provider state is initialized") {
+            BatchProviderState::Pending(_) => Err(PipelineError::NotEnoughData.temp()),
+            BatchProviderState::Queue(queue) => queue.advance_origin().await,
+            BatchProviderState::Validator(validator) => validator.advance_origin().await,
         }
     }
 }
@@ -120,15 +120,11 @@ where
     F: L2ChainProvider + Clone + Debug,
 {
     fn origin(&self) -> Option<BlockInfo> {
-        self.batch_validator.as_ref().map_or_else(
-            || {
-                self.batch_queue.as_ref().map_or_else(
-                    || self.prev.as_ref().and_then(|prev| prev.origin()),
-                    |batch_queue| batch_queue.origin(),
-                )
-            },
-            |batch_validator| batch_validator.origin(),
-        )
+        match self.state.as_ref()? {
+            BatchProviderState::Pending(prev) => prev.origin(),
+            BatchProviderState::Queue(queue) => queue.origin(),
+            BatchProviderState::Validator(validator) => validator.origin(),
+        }
     }
 }
 
@@ -144,37 +140,30 @@ where
         system_config: SystemConfig,
     ) -> PipelineResult<()> {
         self.attempt_update()?;
-
-        if let Some(batch_validator) = self.batch_validator.as_mut() {
-            batch_validator.reset(l1_origin, system_config).await
-        } else if let Some(batch_queue) = self.batch_queue.as_mut() {
-            batch_queue.reset(l1_origin, system_config).await
-        } else {
-            Err(PipelineError::NotEnoughData.temp())
+        match self.state.as_mut().expect("batch provider state is initialized") {
+            BatchProviderState::Pending(_) => Err(PipelineError::NotEnoughData.temp()),
+            BatchProviderState::Queue(queue) => queue.reset(l1_origin, system_config).await,
+            BatchProviderState::Validator(validator) => {
+                validator.reset(l1_origin, system_config).await
+            }
         }
     }
 
     async fn activate(&mut self) -> PipelineResult<()> {
         self.attempt_update()?;
-
-        if let Some(batch_validator) = self.batch_validator.as_mut() {
-            batch_validator.activate().await
-        } else if let Some(batch_queue) = self.batch_queue.as_mut() {
-            batch_queue.activate().await
-        } else {
-            Err(PipelineError::NotEnoughData.temp())
+        match self.state.as_mut().expect("batch provider state is initialized") {
+            BatchProviderState::Pending(_) => Err(PipelineError::NotEnoughData.temp()),
+            BatchProviderState::Queue(queue) => queue.activate().await,
+            BatchProviderState::Validator(validator) => validator.activate().await,
         }
     }
 
     async fn flush_channel(&mut self) -> PipelineResult<()> {
         self.attempt_update()?;
-
-        if let Some(batch_validator) = self.batch_validator.as_mut() {
-            batch_validator.flush_channel().await
-        } else if let Some(batch_queue) = self.batch_queue.as_mut() {
-            batch_queue.flush_channel().await
-        } else {
-            Err(PipelineError::NotEnoughData.temp())
+        match self.state.as_mut().expect("batch provider state is initialized") {
+            BatchProviderState::Pending(_) => Err(PipelineError::NotEnoughData.temp()),
+            BatchProviderState::Queue(queue) => queue.flush_channel().await,
+            BatchProviderState::Validator(validator) => validator.flush_channel().await,
         }
     }
 }
@@ -186,21 +175,19 @@ where
     F: L2ChainProvider + Clone + Send + Debug,
 {
     fn is_last_in_span(&self) -> bool {
-        self.batch_validator.as_ref().map_or_else(
-            || self.batch_queue.as_ref().is_some_and(|batch_queue| batch_queue.is_last_in_span()),
-            |batch_validator| batch_validator.is_last_in_span(),
-        )
+        match self.state.as_ref() {
+            Some(BatchProviderState::Queue(queue)) => queue.is_last_in_span(),
+            Some(BatchProviderState::Validator(validator)) => validator.is_last_in_span(),
+            Some(BatchProviderState::Pending(_)) | None => false,
+        }
     }
 
     async fn next_batch(&mut self, parent: L2BlockInfo) -> PipelineResult<SingleBatch> {
         self.attempt_update()?;
-
-        if let Some(batch_validator) = self.batch_validator.as_mut() {
-            batch_validator.next_batch(parent).await
-        } else if let Some(batch_queue) = self.batch_queue.as_mut() {
-            batch_queue.next_batch(parent).await
-        } else {
-            Err(PipelineError::NotEnoughData.temp())
+        match self.state.as_mut().expect("batch provider state is initialized") {
+            BatchProviderState::Pending(_) => Err(PipelineError::NotEnoughData.temp()),
+            BatchProviderState::Queue(queue) => queue.next_batch(parent).await,
+            BatchProviderState::Validator(validator) => validator.next_batch(parent).await,
         }
     }
 }
@@ -214,7 +201,7 @@ mod tests {
     use base_common_genesis::{BaseUpgradeConfig, RollupConfig, SystemConfig, UpgradeConfig};
     use base_protocol::{Batch, BlockInfo, L2BlockInfo, SingleBatch};
 
-    use super::BatchProvider;
+    use super::{BatchProvider, BatchProviderState};
     use crate::{
         AttributesProvider, PipelineError, StageReset,
         test_utils::{TestL2ChainProvider, TestNextBatchProvider},
@@ -232,9 +219,7 @@ mod tests {
         let mut batch_provider = BatchProvider::new(cfg, provider, l2_provider);
 
         assert!(batch_provider.attempt_update().is_ok());
-        assert!(batch_provider.prev.is_none());
-        assert!(batch_provider.batch_queue.is_none());
-        assert!(batch_provider.batch_validator.is_some());
+        assert!(matches!(batch_provider.state, Some(BatchProviderState::Validator(_))));
     }
 
     #[test]
@@ -245,9 +230,7 @@ mod tests {
         let mut batch_provider = BatchProvider::new(cfg, provider, l2_provider);
 
         assert!(batch_provider.attempt_update().is_ok());
-        assert!(batch_provider.prev.is_none());
-        assert!(batch_provider.batch_queue.is_some());
-        assert!(batch_provider.batch_validator.is_none());
+        assert!(matches!(batch_provider.state, Some(BatchProviderState::Queue(_))));
     }
 
     #[test]
@@ -263,21 +246,20 @@ mod tests {
         batch_provider.attempt_update().unwrap();
 
         // Update the L1 origin to Holocene activation.
-        let Some(ref mut stage) = batch_provider.batch_queue else {
+        let Some(BatchProviderState::Queue(stage)) = batch_provider.state.as_mut() else {
             panic!("Expected BatchQueue");
         };
         stage.prev.origin = Some(BlockInfo { number: 1, timestamp: 2, ..Default::default() });
 
         // Transition to the BatchValidator stage.
         batch_provider.attempt_update().unwrap();
-        assert!(batch_provider.batch_queue.is_none());
-        assert!(batch_provider.batch_validator.is_some());
+        assert!(matches!(batch_provider.state, Some(BatchProviderState::Validator(_))));
 
         assert_eq!(batch_provider.origin().unwrap().number, 1);
     }
 
     #[test]
-    fn test_spec_batch_provider_holocene_transition_origin_not_transferred() {
+    fn test_batch_provider_holocene_transition_retains_l1_window() {
         let provider = TestNextBatchProvider::new(vec![]);
         let l2_provider = TestL2ChainProvider::default();
         let cfg = Arc::new(RollupConfig {
@@ -289,7 +271,7 @@ mod tests {
         batch_provider.attempt_update().unwrap();
 
         // Set origin and l1_blocks on the BatchQueue before the transition.
-        let Some(ref mut stage) = batch_provider.batch_queue else {
+        let Some(BatchProviderState::Queue(stage)) = batch_provider.state.as_mut() else {
             panic!("Expected BatchQueue");
         };
         stage.origin = Some(BlockInfo { number: 5, timestamp: 3, ..Default::default() });
@@ -300,11 +282,12 @@ mod tests {
 
         // Transition to the BatchValidator stage.
         batch_provider.attempt_update().unwrap();
-        assert!(batch_provider.batch_queue.is_none());
-        assert!(batch_provider.batch_validator.is_some());
+        assert!(matches!(batch_provider.state, Some(BatchProviderState::Validator(_))));
 
         // Assert that origin was transferred.
-        let bv = batch_provider.batch_validator.as_ref().unwrap();
+        let Some(BatchProviderState::Validator(bv)) = batch_provider.state.as_ref() else {
+            panic!("Expected BatchValidator");
+        };
         assert_eq!(bv.origin, Some(BlockInfo { number: 5, timestamp: 3, ..Default::default() }));
         assert_eq!(bv.l1_blocks, vec![BlockInfo { number: 5, timestamp: 3, ..Default::default() }]);
     }
@@ -322,25 +305,23 @@ mod tests {
         batch_provider.attempt_update().unwrap();
 
         // Update the L1 origin to Holocene activation.
-        let Some(ref mut stage) = batch_provider.batch_queue else {
+        let Some(BatchProviderState::Queue(stage)) = batch_provider.state.as_mut() else {
             panic!("Expected BatchQueue");
         };
         stage.prev.origin = Some(BlockInfo { number: 1, timestamp: 2, ..Default::default() });
 
         // Transition to the BatchValidator stage.
         batch_provider.attempt_update().unwrap();
-        assert!(batch_provider.batch_queue.is_none());
-        assert!(batch_provider.batch_validator.is_some());
+        assert!(matches!(batch_provider.state, Some(BatchProviderState::Validator(_))));
 
         // Update the L1 origin to before Holocene activation, to simulate a re-org.
-        let Some(ref mut stage) = batch_provider.batch_validator else {
+        let Some(BatchProviderState::Validator(stage)) = batch_provider.state.as_mut() else {
             panic!("Expected BatchValidator");
         };
         stage.prev.origin = Some(BlockInfo::default());
 
         batch_provider.attempt_update().unwrap();
-        assert!(batch_provider.batch_queue.is_some());
-        assert!(batch_provider.batch_validator.is_none());
+        assert!(matches!(batch_provider.state, Some(BatchProviderState::Queue(_))));
     }
 
     #[tokio::test]
@@ -353,7 +334,7 @@ mod tests {
         // Reset the batch provider.
         batch_provider.reset(BlockNumHash::default(), SystemConfig::default()).await.unwrap();
 
-        let Some(bq) = batch_provider.batch_queue else {
+        let Some(BatchProviderState::Queue(bq)) = batch_provider.state else {
             panic!("Expected BatchQueue");
         };
         assert!(bq.l1_blocks.len() == 1);
@@ -372,7 +353,7 @@ mod tests {
         // Reset the batch provider.
         batch_provider.reset(BlockNumHash::default(), SystemConfig::default()).await.unwrap();
 
-        let Some(bv) = batch_provider.batch_validator else {
+        let Some(BatchProviderState::Validator(bv)) = batch_provider.state else {
             panic!("Expected BatchValidator");
         };
         assert!(bv.l1_blocks.len() == 1);
@@ -434,7 +415,9 @@ mod tests {
         };
         let mut batch_provider = BatchProvider::new(cfg, prev, l2_provider);
         batch_provider.attempt_update().unwrap();
-        let validator = batch_provider.batch_validator.as_mut().unwrap();
+        let Some(BatchProviderState::Validator(validator)) = batch_provider.state.as_mut() else {
+            panic!("Expected BatchValidator");
+        };
         validator.origin = Some(origin);
         validator.l1_blocks = vec![origin, origin];
 
@@ -446,7 +429,10 @@ mod tests {
             batch_provider.next_batch(parent).await.unwrap_err(),
             PipelineError::NotEnoughData.temp()
         );
-        assert!(!batch_provider.batch_validator.as_ref().unwrap().prev.flushed);
+        let Some(BatchProviderState::Validator(validator)) = batch_provider.state.as_ref() else {
+            panic!("Expected BatchValidator");
+        };
+        assert!(!validator.prev.flushed);
         assert_eq!(batch_provider.next_batch(parent).await.unwrap(), valid);
     }
 }

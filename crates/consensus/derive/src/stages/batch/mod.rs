@@ -29,7 +29,7 @@ mod batch_validator;
 pub use batch_validator::BatchValidator;
 
 mod batch_provider;
-pub use batch_provider::BatchProvider;
+pub use batch_provider::{BatchProvider, BatchProviderState};
 
 /// Provides [`Batch`]es for the [`BatchQueue`] and [`BatchValidator`] stages.
 #[async_trait]
