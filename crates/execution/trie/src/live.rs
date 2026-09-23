@@ -59,7 +59,7 @@ where
 
         let start = Instant::now();
         // ensure that we have the state of the parent block
-        let (Some((earliest, _)), Some((latest, _))) =
+        let (Some((earliest, _)), Some((latest, latest_hash))) =
             (self.storage.get_earliest_block_number()?, self.storage.get_latest_block_number()?)
         else {
             return Err(BaseProofsStorageError::NoBlocksFound);
@@ -75,6 +75,13 @@ where
                 block_number: block.number(),
                 parent_block_number,
                 latest_block_number: latest,
+            });
+        }
+        if parent_block_number != latest || block.parent_hash() != latest_hash {
+            return Err(BaseProofsStorageError::OutOfOrder {
+                block_number: block.number(),
+                parent_block_hash: block.parent_hash(),
+                latest_block_hash: latest_hash,
             });
         }
 
@@ -355,8 +362,8 @@ where
     where
         S: BaseProofsBatchSession,
     {
-        let latest_in_session =
-            session.get_latest_block_number()?.ok_or(BaseProofsStorageError::NoBlocksFound)?.0;
+        let (latest_in_session, latest_hash) =
+            session.get_latest_block_number()?.ok_or(BaseProofsStorageError::NoBlocksFound)?;
 
         let parent_block_number = block.number() - 1;
         if parent_block_number < earliest {
@@ -367,6 +374,13 @@ where
                 block_number: block.number(),
                 parent_block_number,
                 latest_block_number: latest_in_session,
+            });
+        }
+        if parent_block_number != latest_in_session || block.parent_hash() != latest_hash {
+            return Err(BaseProofsStorageError::OutOfOrder {
+                block_number: block.number(),
+                parent_block_hash: block.parent_hash(),
+                latest_block_hash: latest_hash,
             });
         }
 

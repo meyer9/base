@@ -6,8 +6,10 @@ use alloy_consensus::{BlockHeader, Header, SignableTransaction, TxEip2930, const
 use alloy_genesis::{Genesis, GenesisAccount};
 use alloy_primitives::{Address, B256, TxKind, U256, keccak256};
 use base_execution_trie::{
-    BaseProofsStorage, BaseProofsStorageError, RethTrieStorageLayout, RocksdbProofsStorage,
-    initialize::InitializationJob, live::LiveTrieCollector,
+    BaseProofsStorage, BaseProofsStorageError, BaseProofsStore, RethTrieStorageLayout,
+    RocksdbProofsStorage,
+    initialize::InitializationJob,
+    live::{BatchBlock, LiveTrieCollector},
 };
 use derive_more::Constructor;
 use reth_chainspec::{ChainSpec, ChainSpecBuilder, EthereumHardfork, MAINNET, MIN_TRANSACTION_GAS};
@@ -426,13 +428,17 @@ fn test_execute_and_store_block_updates_state_root_mismatch() {
 
     // Create the next block
     let mut nonce_counter = 0;
-    let last_block_hash = chain_spec.genesis_hash(); // because scenario executes 1 block
+    let latest_hash = storage
+        .get_latest_block_number()
+        .unwrap()
+        .expect("the first live block should be stored")
+        .1;
     let next_number = 2;
 
     let mut block = create_block_from_spec(
         &BlockSpec::new(vec![]),
         next_number,
-        last_block_hash,
+        latest_hash,
         &chain_spec,
         key_pair,
         &mut nonce_counter,
@@ -448,6 +454,71 @@ fn test_execute_and_store_block_updates_state_root_mismatch() {
     let err = collector.execute_and_store_block_updates(&block).unwrap_err();
 
     assert!(matches!(err, BaseProofsStorageError::StateRootMismatch { .. }));
+}
+
+#[test]
+fn test_live_collector_rejects_noncanonical_parent_before_execution() {
+    let dir = TempDir::new().unwrap();
+    let storage: BaseProofsStorage<Arc<RocksdbProofsStorage>> =
+        Arc::new(RocksdbProofsStorage::new(dir.path()).expect("env")).into();
+
+    let secp = Secp256k1::new();
+    let key_pair = Keypair::new(&secp, &mut rand_08::thread_rng());
+    let sender = public_key_to_address(key_pair.public_key());
+    let chain_spec = chain_spec_with_address(sender);
+    let provider_factory = create_test_provider_factory_with_chain_spec(Arc::clone(&chain_spec));
+    init_genesis(&provider_factory).unwrap();
+
+    run_test_scenario(
+        TestScenario::new(vec![], vec![]),
+        provider_factory.clone(),
+        Arc::clone(&chain_spec),
+        key_pair,
+        storage.clone(),
+    )
+    .unwrap();
+
+    let parent_hash = B256::repeat_byte(0x11);
+    let block = create_block_from_spec(
+        &BlockSpec::new(vec![]),
+        1,
+        parent_hash,
+        &chain_spec,
+        key_pair,
+        &mut 0,
+    );
+    let expected_latest_hash = chain_spec.genesis_hash();
+    let collector = LiveTrieCollector::new(
+        EthEvmConfig::ethereum(Arc::clone(&chain_spec)),
+        BlockchainProvider::new(provider_factory).unwrap(),
+        &storage,
+    );
+
+    let error = collector.execute_and_store_block_updates(&block).unwrap_err();
+    assert!(matches!(
+        error,
+        BaseProofsStorageError::OutOfOrder {
+            block_number: 1,
+            parent_block_hash,
+            latest_block_hash,
+        } if parent_block_hash == parent_hash && latest_block_hash == expected_latest_hash
+    ));
+
+    let error =
+        collector.execute_and_store_batch(vec![BatchBlock::Execute(Box::new(block))]).unwrap_err();
+    assert!(matches!(
+        error,
+        BaseProofsStorageError::OutOfOrder {
+            block_number: 1,
+            parent_block_hash,
+            latest_block_hash,
+        } if parent_block_hash == parent_hash && latest_block_hash == expected_latest_hash
+    ));
+    assert_eq!(
+        storage.get_latest_block_number().unwrap(),
+        Some((0, expected_latest_hash)),
+        "rejected fork blocks must not advance the proof window"
+    );
 }
 
 /// Test with multiple blocks before and after initialization
