@@ -282,14 +282,15 @@ impl Discv5Driver {
                                 },
                             }
                             None => {
-                                trace!(target: "discovery", "Receiver `None` peer enr");
+                                info!(target: "discovery", "Discovery request channel closed; stopping service");
+                                return;
                             }
                         }
                     }
                     event = event_stream.recv() => {
                         let Some(event) = event else {
-                            trace!(target: "discovery", "Received `None` event");
-                            continue;
+                            warn!(target: "discovery", "Discovery event stream closed; stopping service");
+                            return;
                         };
                         match event {
                             discv5::Event::Discovered(enr)
@@ -387,7 +388,10 @@ mod tests {
         handler::NodeContact,
     };
     use tempfile::tempdir;
-    use tokio::sync::mpsc;
+    use tokio::{
+        sync::mpsc,
+        time::{Duration, timeout},
+    };
 
     use super::*;
     use crate::LocalNode;
@@ -421,6 +425,32 @@ mod tests {
         drop(rx);
 
         assert!(!try_forward_enr(&tx, test_enr()));
+    }
+
+    #[tokio::test]
+    async fn stops_when_all_request_handles_are_dropped() {
+        let CombinedKey::Secp256k1(secret_key) = CombinedKey::generate_secp256k1() else {
+            unreachable!()
+        };
+
+        let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
+        let mut discovery = Discv5Driver::builder(
+            LocalNode::new(secret_key, IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0, 0),
+            ChainConfig::sepolia().chain_id,
+            ConfigBuilder::new(socket.into()).build(),
+        )
+        .build()
+        .expect("build discovery service");
+        discovery.forward = false;
+        let (handler, mut discovered_enrs) = discovery.start();
+
+        drop(handler);
+
+        timeout(Duration::from_secs(5), async {
+            while discovered_enrs.recv().await.is_some() {}
+        })
+        .await
+        .expect("discovery task should stop after request handles are dropped");
     }
 
     #[tokio::test]
