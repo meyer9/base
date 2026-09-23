@@ -875,6 +875,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn send_raw_transaction_validity_rejects_contradictory_timing_predicates() {
+        let rpc =
+            SendRawTransactionValidityApiImpl::new(zenith_provider(), test_transaction_sender());
+        let (raw, mut options) = validity_request(Bytes::from_static(&[0x02]));
+        // Every predicate is individually valid and the upper bound is within the default
+        // lifetime window, but no block can satisfy both bounds. Without ingress rejection this
+        // transaction is retained and rechecked by the builder despite being permanently inert.
+        options.validity = vec![
+            ValidityPredicate::BlockNumber {
+                op: base_execution_txpool::ValidityOperator::GreaterThanOrEqual,
+                value: U256::from(2),
+            },
+            ValidityPredicate::BlockNumber {
+                op: base_execution_txpool::ValidityOperator::LessThanOrEqual,
+                value: U256::from(1),
+            },
+        ];
+
+        let error = rpc
+            .send_raw_transaction_validity(raw, options)
+            .await
+            .expect_err("contradictory timing predicates should be rejected before decoding");
+
+        assert_eq!(error.code(), ErrorCode::InvalidParams.code());
+        assert!(error.message().contains("block-number predicates cannot be satisfied together"));
+    }
+
+    #[tokio::test]
     async fn send_raw_transaction_validity_rejects_unsatisfiable_flashblock_index() {
         let rpc =
             SendRawTransactionValidityApiImpl::new(zenith_provider(), test_transaction_sender());

@@ -88,6 +88,16 @@ pub enum ValidityPredicateError {
     /// The submission has no block-number upper bound, so it does not have a bounded lifetime.
     #[error("validity transactions require a block-number predicate with an upper bound")]
     MissingBlockExpiry,
+    /// The batch contains timing predicates that cannot hold at the same build position.
+    ///
+    /// `kind` identifies whether the contradictory predicates constrain the block number or
+    /// flashblock index. Such a batch would otherwise remain parked until its unrelated expiry,
+    /// consuming pool capacity and repeated builder evaluation.
+    #[error("{kind} predicates cannot be satisfied together")]
+    ContradictoryTimingPredicates {
+        /// The timing coordinate constrained by the contradictory predicates.
+        kind: &'static str,
+    },
     /// A block-number predicate's tightest upper bound exceeds the configured lifetime window.
     #[error(
         "block-number predicate at index {index} expires too far in the future: last satisfiable block {bound} exceeds the maximum permitted block {maximum_block}"
@@ -264,7 +274,93 @@ impl ValidityPredicate {
         for (index, predicate) in predicates.iter().enumerate() {
             predicate.validate_params(index)?;
         }
-        Ok(())
+        Self::validate_timing_predicates(predicates)
+    }
+
+    /// Validates that all block-number and flashblock-index predicates can hold together.
+    ///
+    /// Predicate batches are conjunctions. Individually valid timing predicates can therefore
+    /// still describe no legal build position, for example `block_number >= 102` together with
+    /// `block_number <= 101`, or `flashblock_index = 1` with `flashblock_index != 1`.
+    /// Rejecting that shape at ingress prevents a permanently parked transaction from consuming
+    /// pool capacity and builder predicate checks until some unrelated expiry removes it.
+    pub fn validate_timing_predicates(predicates: &[Self]) -> Result<(), ValidityPredicateError> {
+        Self::validate_timing_coordinate(predicates, true, "block-number", U256::ZERO)?;
+        Self::validate_timing_coordinate(
+            predicates,
+            false,
+            "flashblock-index",
+            U256::from(FIRST_POOL_FLASHBLOCK_INDEX),
+        )
+    }
+
+    fn validate_timing_coordinate(
+        predicates: &[Self],
+        block_number: bool,
+        kind: &'static str,
+        minimum: U256,
+    ) -> Result<(), ValidityPredicateError> {
+        let mut lower = minimum;
+        let mut upper = None;
+        let mut excluded = Vec::new();
+
+        for predicate in predicates {
+            let (op, value) = match predicate {
+                Self::BlockNumber { op, value } if block_number => (*op, *value),
+                Self::FlashblockIndex { op, value } if !block_number => (*op, *value),
+                _ => continue,
+            };
+
+            match op {
+                ValidityOperator::LessThan => {
+                    let Some(bound) = value.checked_sub(U256::from(1)) else {
+                        return Err(ValidityPredicateError::ContradictoryTimingPredicates { kind });
+                    };
+                    upper = Some(upper.map_or(bound, |current: U256| current.min(bound)));
+                }
+                ValidityOperator::LessThanOrEqual => {
+                    upper = Some(upper.map_or(value, |current: U256| current.min(value)));
+                }
+                ValidityOperator::Equal => {
+                    lower = lower.max(value);
+                    upper = Some(upper.map_or(value, |current: U256| current.min(value)));
+                }
+                ValidityOperator::NotEqual => excluded.push(value),
+                ValidityOperator::GreaterThan => {
+                    let Some(bound) = value.checked_add(U256::from(1)) else {
+                        return Err(ValidityPredicateError::ContradictoryTimingPredicates { kind });
+                    };
+                    lower = lower.max(bound);
+                }
+                ValidityOperator::GreaterThanOrEqual => lower = lower.max(value),
+            }
+        }
+
+        if upper.is_some_and(|bound| lower > bound) {
+            return Err(ValidityPredicateError::ContradictoryTimingPredicates { kind });
+        }
+
+        let Some(upper) = upper else { return Ok(()) };
+        let Some(span) = upper.checked_sub(lower) else {
+            return Err(ValidityPredicateError::ContradictoryTimingPredicates { kind });
+        };
+        if span >= U256::from(excluded.len()) {
+            return Ok(());
+        }
+
+        let mut candidate = lower;
+        loop {
+            if !excluded.contains(&candidate) {
+                return Ok(());
+            }
+            if candidate == upper {
+                return Err(ValidityPredicateError::ContradictoryTimingPredicates { kind });
+            }
+            let Some(next) = candidate.checked_add(U256::from(1)) else {
+                return Err(ValidityPredicateError::ContradictoryTimingPredicates { kind });
+            };
+            candidate = next;
+        }
     }
 
     /// Validates that a batch contains a `block_number` upper-bound predicate.
@@ -593,6 +689,8 @@ impl ValidatedTransactionExtensions<BasePooledTransaction> for TransactionValidi
         for (index, predicate) in self.validity.iter().enumerate() {
             predicate.validate_params(index).map_err(|e| ExtensionError(e.to_string()))?;
         }
+        ValidityPredicate::validate_timing_predicates(&self.validity)
+            .map_err(|error| ExtensionError(error.to_string()))?;
         Ok(tx.with_validity_predicates(self.validity))
     }
 }
@@ -1261,6 +1359,81 @@ mod tests {
             ValidityPredicate::validate_batch(&predicates, DEFAULT_MAX_VALIDITY_PREDICATES),
             Err(ValidityPredicateError::UnsatisfiableFlashblockIndex { index: 1 })
         );
+    }
+
+    #[test]
+    fn validate_batch_rejects_contradictory_timing_predicates() {
+        let contradictory_batches = [
+            (
+                vec![
+                    block_number(ValidityOperator::GreaterThanOrEqual, 102),
+                    block_number(ValidityOperator::LessThanOrEqual, 101),
+                ],
+                "block-number",
+            ),
+            (
+                vec![
+                    flashblock_index(ValidityOperator::Equal, 1),
+                    flashblock_index(ValidityOperator::NotEqual, 1),
+                ],
+                "flashblock-index",
+            ),
+        ];
+
+        for (predicates, kind) in contradictory_batches {
+            assert_eq!(
+                ValidityPredicate::validate_batch(&predicates, DEFAULT_MAX_VALIDITY_PREDICATES),
+                Err(ValidityPredicateError::ContradictoryTimingPredicates { kind })
+            );
+        }
+    }
+
+    #[test]
+    fn validate_batch_accepts_timing_predicates_with_a_remaining_position() {
+        let predicates = vec![
+            block_number(ValidityOperator::GreaterThanOrEqual, 100),
+            block_number(ValidityOperator::LessThanOrEqual, 101),
+            block_number(ValidityOperator::NotEqual, 100),
+            flashblock_index(ValidityOperator::GreaterThanOrEqual, 1),
+            flashblock_index(ValidityOperator::LessThanOrEqual, 2),
+            flashblock_index(ValidityOperator::NotEqual, 1),
+        ];
+
+        assert_eq!(
+            ValidityPredicate::validate_batch(&predicates, DEFAULT_MAX_VALIDITY_PREDICATES),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn apply_rejects_contradictory_timing_predicates() {
+        let signed: BaseTransactionSigned = TxDeposit {
+            source_hash: Default::default(),
+            from: Address::ZERO,
+            to: TxKind::Create,
+            mint: 0,
+            value: U256::ZERO,
+            gas_limit: 21_000,
+            is_system_transaction: false,
+            input: Default::default(),
+        }
+        .into();
+        let encoded_length = signed.encode_2718_len();
+        let transaction = BasePooledTransaction::new(
+            Recovered::new_unchecked(signed, Address::ZERO),
+            encoded_length,
+        );
+        let extension = TransactionValidity {
+            validity: vec![
+                block_number(ValidityOperator::Equal, 100),
+                block_number(ValidityOperator::NotEqual, 100),
+            ],
+        };
+
+        let error =
+            extension.apply(transaction).expect_err("contradictory timing must be rejected");
+
+        assert!(error.to_string().contains("block-number predicates cannot be satisfied together"));
     }
 
     #[test]
