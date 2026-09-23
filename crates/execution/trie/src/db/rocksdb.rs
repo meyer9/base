@@ -2525,22 +2525,38 @@ where
                 IteratorMode::From(&start_key, Direction::Forward),
             );
             let mut last_candidate = None;
+            let mut has_newer_versions = false;
             let mut found = None;
 
             for item in iter {
-                let (raw_key, _) = item.map_err(rocksdb_error)?;
-                let (candidate, _) = decode_history_key::<T>(&raw_key)?;
+                let (raw_key, raw_value) = item.map_err(rocksdb_error)?;
+                let (candidate, block_number) = decode_history_key::<T>(&raw_key)?;
                 let before_start = if exclusive { candidate <= key } else { candidate < key };
                 if before_start || last_candidate.as_ref() == Some(&candidate) {
                     continue;
                 }
 
-                last_candidate = Some(candidate.clone());
-                if let Some((live_key, latest_value)) = self.latest_version_for_key(&candidate)?
-                    && let MaybeDeleted(Some(value)) = latest_value.value
-                {
-                    found = Some((live_key, value));
-                    break;
+                if !has_newer_versions && block_number <= self.max_block_number {
+                    last_candidate = Some(candidate.clone());
+                    let latest_value = T::Value::decompress(&raw_value)?;
+                    if let MaybeDeleted(Some(value)) = latest_value.value {
+                        found = Some((candidate, value));
+                        break;
+                    }
+                } else {
+                    // At the chain head, this scan is already on the latest row for each
+                    // history key. Reuse it instead of opening a second RocksDB iterator. An
+                    // historical cursor still seeks directly to its requested version rather
+                    // than walking newer rows one by one.
+                    has_newer_versions = true;
+                    last_candidate = Some(candidate.clone());
+                    if let Some((live_key, latest_value)) =
+                        self.latest_version_for_key(&candidate)?
+                        && let MaybeDeleted(Some(value)) = latest_value.value
+                    {
+                        found = Some((live_key, value));
+                        break;
+                    }
                 }
             }
 

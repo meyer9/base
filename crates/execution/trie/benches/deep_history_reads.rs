@@ -26,6 +26,7 @@ use rand_08::{RngCore, SeedableRng, rngs::StdRng};
 use reth_primitives_traits::Account;
 use reth_provider::{AccountReader, noop::NoopProvider};
 use reth_revm::{Database, State, database::StateProviderDatabase};
+use reth_trie::hashed_cursor::HashedCursor;
 use reth_trie_common::{HashedPostState, updates::TrieUpdates};
 use tempfile::TempDir;
 
@@ -197,6 +198,21 @@ fn read_accounts_at_block(fixture: &DeepHistoryFixture, max_block: u64) -> usize
     reads
 }
 
+fn iterate_accounts_at_block(fixture: &DeepHistoryFixture, max_block: u64) -> usize {
+    let mut cursor = fixture.storage.account_hashed_cursor(max_block).expect("open account cursor");
+    let mut reads = 0;
+
+    while reads < TARGET_ACCOUNTS {
+        let Some((_, account)) = cursor.next().expect("read account") else {
+            break;
+        };
+        black_box(account);
+        reads += 1;
+    }
+
+    reads
+}
+
 fn deep_history_benches(c: &mut Criterion) {
     let uncompacted = create_fixture(false);
     let compacted = create_fixture(true);
@@ -211,6 +227,14 @@ fn deep_history_benches(c: &mut Criterion) {
 
     group.bench_function(BenchmarkId::new("chain_mid_reads", TARGET_ACCOUNTS), |b| {
         b.iter(|| black_box(read_accounts_at_block(&uncompacted, mid_block)));
+    });
+
+    group.bench_function(BenchmarkId::new("cursor_head_reads", TARGET_ACCOUNTS), |b| {
+        b.iter(|| black_box(iterate_accounts_at_block(&uncompacted, VERSIONS_PER_KEY)));
+    });
+
+    group.bench_function(BenchmarkId::new("cursor_mid_reads", TARGET_ACCOUNTS), |b| {
+        b.iter(|| black_box(iterate_accounts_at_block(&uncompacted, mid_block)));
     });
 
     group.bench_function(BenchmarkId::new("chain_head_reads_compacted", TARGET_ACCOUNTS), |b| {
