@@ -175,19 +175,29 @@ impl CliMetrics {
         )
         .set(1);
 
+        Self::record_upgrade_activation_times(config);
+    }
+
+    /// Records activation timestamps from the effective runtime hardfork schedule.
+    ///
+    /// Runtime L1 schedule updates live in [`base_common_genesis::RuntimeUpgradeRegistry`], not
+    /// in the startup [`RollupConfig`]. Resolve that canonical runtime view for every recording so
+    /// the activation gauges and countdown gauges describe the same schedule operators will run.
+    pub fn record_upgrade_activation_times(config: &RollupConfig) {
+        let config = config.with_runtime_upgrade_overrides();
         for (upgrade, activation_time) in config.upgrades.iter() {
             // Use `-1` as a signal that the upgrade is not scheduled.
-            let time: f64 = activation_time.map(|t| t as f64).unwrap_or(-1f64);
+            let time: f64 = activation_time.map(|timestamp| timestamp as f64).unwrap_or(-1.0);
             if let Some(label) = upgrade_metric_label(upgrade) {
                 metrics::gauge!(Self::UPGRADE_ACTIVATION_TIMES, "upgrade" => label).set(time);
             }
         }
     }
 
-    /// Starts the periodic recorder for the next scheduled upgrade countdown metric.
+    /// Starts the periodic recorder for runtime upgrade activation and countdown metrics.
     ///
     /// This must be called from an active Tokio runtime. The static rollup config metrics are
-    /// initialized before the runtime exists in some CLI paths, so the dynamic countdown recorder is
+    /// initialized before the runtime exists in some CLI paths, so the dynamic upgrade recorder is
     /// started separately by the async command entrypoints. The recorder owns its rollup config so
     /// it can re-query runtime-aware activation timestamps on each tick.
     pub fn spawn_upgrade_countdown_recorder(config: RollupConfig) -> JoinHandle<()> {
@@ -199,6 +209,7 @@ impl CliMetrics {
             loop {
                 interval.tick().await;
                 let now = current_unix_timestamp();
+                Self::record_upgrade_activation_times(&config);
                 let countdown_config = config.with_runtime_upgrade_overrides();
                 Self::record_seconds_until_next_upgrade(
                     &countdown_config,
@@ -305,6 +316,10 @@ fn seconds_until_next_upgrades(config: &RollupConfig, now: u64) -> Vec<(&'static
 mod tests {
     use alloy_chains::Chain;
     use base_common_genesis::{RuntimeUpgradeRegistry, UpgradeConfig};
+    use metrics_util::{
+        MetricKind,
+        debugging::{DebugValue, DebuggingRecorder},
+    };
 
     use super::*;
 
@@ -380,6 +395,40 @@ mod tests {
         };
 
         assert_eq!(seconds_until_next_upgrades(&config, 900), vec![("Azul", 100), ("Beryl", 100)]);
+    }
+
+    #[test]
+    fn activation_time_metrics_reflect_runtime_registry_updates() {
+        let chain_id = 9_200_000;
+        RuntimeUpgradeRegistry::clear_chain(chain_id);
+        let config = RollupConfig { l2_chain_id: Chain::from_id(chain_id), ..Default::default() };
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        RuntimeUpgradeRegistry::set_activation_timestamp(chain_id, BaseUpgrade::Beryl, 1_000);
+        metrics::with_local_recorder(&recorder, || {
+            CliMetrics::record_upgrade_activation_times(&config);
+        });
+        RuntimeUpgradeRegistry::set_activation_timestamp(chain_id, BaseUpgrade::Beryl, 2_000);
+        metrics::with_local_recorder(&recorder, || {
+            CliMetrics::record_upgrade_activation_times(&config);
+        });
+
+        let snapshot = snapshotter.snapshot().into_vec();
+        let value = snapshot
+            .iter()
+            .find(|(key, _, _, _)| {
+                key.kind() == MetricKind::Gauge
+                    && key.key().name() == CliMetrics::UPGRADE_ACTIVATION_TIMES
+                    && key
+                        .key()
+                        .labels()
+                        .any(|label| label.key() == "upgrade" && label.value() == "Beryl")
+            })
+            .map(|(_, _, _, value)| value);
+        assert_eq!(value, Some(&DebugValue::Gauge(2_000.0.into())));
+
+        RuntimeUpgradeRegistry::clear_chain(chain_id);
     }
 
     #[test]
