@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use alloy_consensus::{BlockHeader, Header};
@@ -23,7 +23,7 @@ use base_proof_host::HostConfig;
 use base_proof_zk_utils::{INTERMEDIATE_ROOT_INTERVAL, boot::BootInfoStruct};
 use base_protocol::L2BlockInfo;
 use futures::{StreamExt, stream};
-use reqwest::Url;
+use reqwest::{StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -35,7 +35,6 @@ use crate::{
 #[derive(Clone)]
 /// The `OPSuccinctDataFetcher` struct is used to fetch the L2 output data and L2 claim data for a
 /// given block number. It is used to generate the boot info for the native host program.
-/// FIXME: Add retries for all requests (3 retries).
 pub struct OPSuccinctDataFetcher {
     /// RPC endpoint configuration.
     pub rpc_config: RPCConfig,
@@ -102,6 +101,15 @@ fn resolve_config_dir(explicit: Option<&Path>, env_name: &str, default: &str) ->
         env::var_os(env_name).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(default))
     })
 }
+
+fn is_retryable_rpc_status(status: StatusCode) -> bool {
+    status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+/// Maximum attempts for a retryable L2-node JSON-RPC request.
+const RPC_REQUEST_MAX_ATTEMPTS: usize = 3;
+/// Delay between retryable L2-node JSON-RPC attempts.
+const RPC_REQUEST_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 /// The mode corresponding to the chain we are fetching data for.
 #[derive(Clone, Copy, Debug)]
@@ -474,26 +482,59 @@ impl OPSuccinctDataFetcher {
         T: serde::de::DeserializeOwned,
     {
         let client = reqwest::Client::new();
-        let response = client
-            .post(url.clone())
-            .json(&json!({
-                "jsonrpc": "2.0",
-                "method": method,
-                "params": params,
-                "id": 1
-            }))
-            .send()
-            .await?
-            .json::<serde_json::Value>()
-            .await?;
+        let request = json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+            "id": 1
+        });
 
-        // Check for RPC error from the JSON RPC response.
-        if let Some(error) = response.get("error") {
-            let error_message = error["message"].as_str().unwrap_or("Unknown error");
-            return Err(anyhow::anyhow!("Error calling {method}: {error_message}"));
+        for attempt in 1..=RPC_REQUEST_MAX_ATTEMPTS {
+            let response = client.post(url.clone()).json(&request).send().await;
+            let response = match response {
+                Ok(response) if is_retryable_rpc_status(response.status()) => {
+                    let error = anyhow!("HTTP {}", response.status());
+                    if attempt == RPC_REQUEST_MAX_ATTEMPTS {
+                        return Err(error).with_context(|| format!("calling {method}"));
+                    }
+                    tracing::warn!(
+                        attempt,
+                        max_attempts = RPC_REQUEST_MAX_ATTEMPTS,
+                        error = %error,
+                        method = %method,
+                        "retrying L2-node RPC request"
+                    );
+                    tokio::time::sleep(RPC_REQUEST_RETRY_DELAY).await;
+                    continue;
+                }
+                Ok(response) => response.error_for_status()?,
+                Err(error) => {
+                    if attempt == RPC_REQUEST_MAX_ATTEMPTS {
+                        return Err(error).with_context(|| format!("calling {method}"));
+                    }
+                    tracing::warn!(
+                        attempt,
+                        max_attempts = RPC_REQUEST_MAX_ATTEMPTS,
+                        error = %error,
+                        method = %method,
+                        "retrying L2-node RPC request"
+                    );
+                    tokio::time::sleep(RPC_REQUEST_RETRY_DELAY).await;
+                    continue;
+                }
+            };
+            let response = response.json::<serde_json::Value>().await?;
+
+            // Check for RPC error from the JSON RPC response.
+            if let Some(error) = response.get("error") {
+                let error_message = error["message"].as_str().unwrap_or("Unknown error");
+                return Err(anyhow!("Error calling {method}: {error_message}"));
+            }
+
+            return serde_json::from_value(response["result"].clone()).map_err(Into::into);
         }
 
-        serde_json::from_value(response["result"].clone()).map_err(Into::into)
+        unreachable!("RPC retry loop always returns")
     }
 
     /// Fetch arbitrary data from the RPC.
@@ -871,7 +912,62 @@ impl OPSuccinctDataFetcher {
 
 #[cfg(test)]
 mod tests {
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        task::JoinHandle,
+    };
+
     use super::*;
+
+    async fn start_rpc_server(responses: Vec<String>) -> (Url, JoinHandle<usize>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut requests = 0;
+            for response in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                let read = stream.read(&mut request).await.unwrap();
+                assert_ne!(read, 0, "client must send an RPC request");
+                stream.write_all(response.as_bytes()).await.unwrap();
+                requests += 1;
+            }
+            requests
+        });
+        (format!("http://{address}").parse().unwrap(), server)
+    }
+
+    fn rpc_response(status: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    fn fetcher_for_l2_node(url: Url) -> OPSuccinctDataFetcher {
+        let rpc_config = RPCConfig {
+            l1_rpc: url.clone(),
+            l1_beacon_rpc: None,
+            l2_rpc: url.clone(),
+            l2_node_rpc: url,
+            l1_config_dir: None,
+            l2_config_dir: None,
+        };
+        let l1_provider =
+            Arc::new(ProviderBuilder::default().connect_http(rpc_config.l1_rpc.clone()));
+        let l2_provider =
+            Arc::new(ProviderBuilder::default().connect_http(rpc_config.l2_rpc.clone()));
+
+        OPSuccinctDataFetcher {
+            rpc_config,
+            l1_provider,
+            l2_provider,
+            rollup_config: None,
+            rollup_config_path: None,
+            l1_config_path: None,
+        }
+    }
 
     fn rpc_config(l1: Option<PathBuf>, l2: Option<PathBuf>) -> RPCConfig {
         RPCConfig {
@@ -889,5 +985,40 @@ mod tests {
         let rpc = rpc_config(Some(PathBuf::from("/tmp/l1")), Some(PathBuf::from("/tmp/l2")));
         assert_eq!(rpc.l1_config_directory(), PathBuf::from("/tmp/l1"));
         assert_eq!(rpc.l2_config_directory(), PathBuf::from("/tmp/l2"));
+    }
+
+    #[tokio::test]
+    async fn retries_l2_node_rpc_after_a_transient_server_failure() {
+        let (url, server) = start_rpc_server(vec![
+            rpc_response("503 Service Unavailable", ""),
+            rpc_response("200 OK", r#"{"jsonrpc":"2.0","id":1,"result":7}"#),
+        ])
+        .await;
+
+        let chain_id = fetcher_for_l2_node(url)
+            .fetch_rpc_data_with_mode::<u64>(RPCMode::L2Node, "optimism_rollupConfig", vec![])
+            .await
+            .unwrap();
+
+        assert_eq!(chain_id, 7);
+        assert_eq!(server.await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn bounds_l2_node_rpc_retries_after_persistent_server_failures() {
+        let (url, server) = start_rpc_server(
+            (0..RPC_REQUEST_MAX_ATTEMPTS)
+                .map(|_| rpc_response("503 Service Unavailable", ""))
+                .collect(),
+        )
+        .await;
+
+        let error = fetcher_for_l2_node(url)
+            .fetch_rpc_data_with_mode::<u64>(RPCMode::L2Node, "optimism_rollupConfig", vec![])
+            .await
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("HTTP 503 Service Unavailable"));
+        assert_eq!(server.await.unwrap(), RPC_REQUEST_MAX_ATTEMPTS);
     }
 }
