@@ -76,6 +76,7 @@ rstest.workspace = true
 httpmock.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+metrics-util = { workspace = true, features = ["debugging"] }
 
 [features]
 default = [ "otlp" ]

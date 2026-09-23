@@ -3867,6 +3867,7 @@ dependencies = [
  "httpmock",
  "libp2p",
  "metrics",
+ "metrics-util",
  "reqwest 0.13.4",
  "reth-node-core",
  "rstest",
