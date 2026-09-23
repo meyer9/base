@@ -151,9 +151,15 @@ where
             return self.try_read_channel_at_index(0).map(Some);
         }
 
-        let channel_data =
-            (0..self.channel_queue.len()).find_map(|i| self.try_read_channel_at_index(i).ok());
-        channel_data.map_or_else(|| Err(PipelineError::Eof.temp()), |data| Ok(Some(data)))
+        for index in 0..self.channel_queue.len() {
+            match self.try_read_channel_at_index(index) {
+                Ok(data) => return Ok(Some(data)),
+                Err(PipelineErrorKind::Temporary(PipelineError::Eof)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+
+        Err(PipelineError::Eof.temp())
     }
 
     /// Attempts to read the channel at the specified index. If the channel is not ready or timed
@@ -410,6 +416,21 @@ mod tests {
             frame_data,
             Some(alloy_primitives::bytes!("736576656e5f5f736576656e5f5f736576656e5f5f"))
         );
+    }
+
+    #[test]
+    fn test_read_channel_active_propagates_missing_channel() {
+        let mock = TestNextFrameProvider::new(vec![]);
+        let cfg = Arc::new(RollupConfig {
+            upgrades: UpgradeConfig { canyon_time: Some(0), ..Default::default() },
+            ..Default::default()
+        });
+        let mut channel_bank = ChannelBank::new(cfg, mock);
+        channel_bank.channel_queue.push_back([0xFF; 16]);
+
+        let err = channel_bank.read().unwrap_err();
+
+        assert_eq!(err, PipelineError::ChannelProviderEmpty.crit());
     }
 
     #[test]
