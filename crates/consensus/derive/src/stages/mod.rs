@@ -47,7 +47,8 @@ pub use channel::{
 
 mod batch;
 pub use batch::{
-    BatchProvider, BatchQueue, BatchStream, BatchStreamProvider, BatchValidator, NextBatchProvider,
+    BatchProvider, BatchProviderState, BatchQueue, BatchStream, BatchStreamProvider,
+    BatchValidator, NextBatchProvider,
 };
 
 mod attributes_queue;

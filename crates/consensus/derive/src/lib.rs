@@ -36,10 +36,11 @@ pub use sources::{
 
 mod stages;
 pub use stages::{
-    AttributesQueue, BatchProvider, BatchQueue, BatchStream, BatchStreamProvider, BatchValidator,
-    ChannelAssembler, ChannelBank, ChannelProvider, ChannelReader, ChannelReaderProvider,
-    FJORD_MAX_CHANNEL_BANK_SIZE, FrameQueue, FrameQueueProvider, L1Retrieval, L1RetrievalProvider,
-    MAX_CHANNEL_BANK_SIZE, NextBatchProvider, NextFrameProvider, PollingTraversal,
+    AttributesQueue, BatchProvider, BatchProviderState, BatchQueue, BatchStream,
+    BatchStreamProvider, BatchValidator, ChannelAssembler, ChannelBank, ChannelProvider,
+    ChannelReader, ChannelReaderProvider, FJORD_MAX_CHANNEL_BANK_SIZE, FrameQueue,
+    FrameQueueProvider, L1Retrieval, L1RetrievalProvider, MAX_CHANNEL_BANK_SIZE, NextBatchProvider,
+    NextFrameProvider, PollingTraversal,
 };
 
 mod traits;
