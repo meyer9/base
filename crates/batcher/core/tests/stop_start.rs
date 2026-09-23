@@ -8,7 +8,7 @@ use std::{
 use alloy_primitives::Address;
 use base_batcher_core::{
     AdminError, AdminHandle, BatchDriver, BatchDriverConfig, DaThrottle, DerivationStatus,
-    NoopThrottleClient, ThrottleController,
+    NoopThrottleClient, ThrottleConfig, ThrottleController, ThrottleStrategy,
     test_utils::{
         DriverFixture, ImmediateConfirmTxManager, ManualConfirmTxManager, PendingL1HeadSource,
         Recorded, SubmissionStub, TrackingPipeline, TrackingSource,
@@ -230,6 +230,48 @@ fn test_stop_leaves_in_flight_submissions_to_settle() {
         tx_manager.confirm_next(1);
         ctx.sleep(Duration::from_millis(1)).await;
         assert_eq!(admin_handle.get_status().await.unwrap().in_flight, 0);
+
+        ctx.cancel();
+        assert!(handle.await.unwrap().is_ok());
+    });
+}
+
+/// `set_throttle` returns only after the driver has installed the controller, so the
+/// next status read reflects the configuration acknowledged to the operator.
+#[test]
+fn test_set_throttle_waits_for_driver_application() {
+    Runner::start(Config::seeded(0), |ctx| async move {
+        let recorded = Arc::new(Mutex::new(Recorded::default()));
+        let pipeline = TrackingPipeline::new(recorded);
+        let (admin_handle, admin_rx) = AdminHandle::channel();
+        let config = ThrottleConfig {
+            threshold_bytes: 123,
+            max_intensity: 0.5,
+            block_size_lower_limit: 456,
+            block_size_upper_limit: 789,
+            tx_size_lower_limit: 12,
+            tx_size_upper_limit: 34,
+        };
+
+        let driver =
+            DriverFixture::build(ctx.clone(), pipeline, ImmediateConfirmTxManager { l1_block: 1 })
+                .with_admin_rx(admin_rx);
+        let handle = ctx.spawn(driver.run());
+
+        admin_handle
+            .set_throttle(ThrottleStrategy::Step, config.clone())
+            .await
+            .expect("setThrottleController must acknowledge after installation");
+        let info = admin_handle
+            .get_throttle_info()
+            .await
+            .expect("getThrottleController must remain available after an acknowledged update");
+
+        assert_eq!(info.strategy, ThrottleStrategy::Step);
+        assert_eq!(info.threshold_bytes, config.threshold_bytes);
+        assert_eq!(info.max_intensity, config.max_intensity);
+        assert_eq!(info.max_block_size, config.block_size_upper_limit);
+        assert_eq!(info.max_tx_size, config.tx_size_upper_limit);
 
         ctx.cancel();
         assert!(handle.await.unwrap().is_ok());
