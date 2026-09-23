@@ -128,6 +128,44 @@ mod tests {
     }
 
     #[test]
+    fn rejects_incomplete_manual_s3_configuration() {
+        let error = Cli::try_parse_from([
+            "base-snapshotter",
+            "--container-name=execution",
+            "--el-rpc-url=http://execution:8545",
+            "--source-datadir=/data",
+            "--bucket=snapshots",
+            "--s3-config-type=manual",
+        ])
+        .expect_err("manual S3 configuration without an endpoint or credentials must fail")
+        .to_string();
+
+        for flag in ["--s3-endpoint", "--s3-access-key-id", "--s3-secret-access-key"] {
+            assert!(error.contains(flag), "missing required manual S3 flag {flag}: {error}");
+        }
+    }
+
+    #[test]
+    fn accepts_complete_manual_s3_configuration() {
+        let cli = Cli::try_parse_from([
+            "base-snapshotter",
+            "--container-name=execution",
+            "--el-rpc-url=http://execution:8545",
+            "--source-datadir=/data",
+            "--bucket=snapshots",
+            "--s3-config-type=manual",
+            "--s3-endpoint=http://minio:9000",
+            "--s3-access-key-id=test-access-key",
+            "--s3-secret-access-key=test-secret-key",
+        ])
+        .expect("complete manual S3 configuration must parse");
+
+        assert_eq!(cli.snapshotter.s3_endpoint.as_deref(), Some("http://minio:9000"));
+        assert_eq!(cli.snapshotter.s3_access_key_id.as_deref(), Some("test-access-key"));
+        assert_eq!(cli.snapshotter.s3_secret_access_key.as_deref(), Some("test-secret-key"));
+    }
+
+    #[test]
     fn omits_consensus_container_name_when_flag_absent() {
         let cli = Cli::try_parse_from([
             "base-snapshotter",
