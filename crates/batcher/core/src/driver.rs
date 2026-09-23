@@ -83,15 +83,15 @@ where
     throttle: DaThrottle<TC>,
     /// L1 head source for chain head advancement.
     ///
-    /// Set to `None` after the source returns [`SourceError::Exhausted`] or
-    /// [`SourceError::Closed`], causing the driver to park that select arm forever.
+    /// Set to `None` after the source returns [`SourceError::Closed`], causing the
+    /// driver to park that select arm forever.
     l1_head_source: Option<L>,
     /// Last trusted L2 safe head.
     safe_head: Option<BlockInfo>,
     /// Ordered derivation-progress snapshots.
     derivation_status_rx: Option<mpsc::Receiver<DerivationStatus>>,
     /// Maximum wall-clock time to wait for in-flight submissions to settle
-    /// when draining on cancellation or source exhaustion.
+    /// when draining on cancellation.
     drain_timeout: Duration,
     /// Whether block ingestion is currently stopped (via admin or the `--stopped` flag).
     stopped: bool,
@@ -218,8 +218,8 @@ where
     /// 1. **CPU phase**: drain encoding, apply throttle, recover txpool, submit pending frames.
     /// 2. **I/O phase**: block on `tokio::select!` until one external event fires.
     ///
-    /// When shutting down (after cancellation or source exhaustion), the I/O phase is
-    /// replaced by a bounded drain of all in-flight receipts.
+    /// When shutting down after cancellation, the I/O phase is replaced by a bounded
+    /// drain of all in-flight receipts.
     ///
     /// If a [`DriverEvent::SourceFlush`] carried an acknowledgement, it fires as soon as a later
     /// CPU phase reports both encoding and submission fully drained (i.e. the flush's frames
@@ -315,10 +315,6 @@ where
                 }
                 DriverEvent::DerivationStatus(status) => {
                     self.on_derivation_status(status);
-                }
-                DriverEvent::L1SourceClosed => {
-                    debug!("L1 head source closed, disabling arm");
-                    self.l1_head_source = None;
                 }
             }
         }
@@ -586,25 +582,21 @@ where
                     }
                 }
 
-                event = self.source.next() => match event {
-                    Ok(L2BlockEvent::Block(_)) if self.stopped => {
-                        continue;
-                    }
-                    Ok(L2BlockEvent::Flush { ack }) if self.stopped => {
+                event = self.source.next() => match event? {
+                    L2BlockEvent::Block(_) if self.stopped => continue,
+                    L2BlockEvent::Flush { ack } if self.stopped => {
                         // Drop (rather than fire) any ack: the batcher is stopped, so this
-                        // flush produces no frames and firing would falsely report
-                        // settlement. The waiter observes a closed-channel error instead of
-                        // a silent, indefinite-looking drop.
+                        // flush produces no frames and firing would falsely report settlement.
+                        // The waiter observes a closed-channel error instead of a silent,
+                        // indefinite-looking drop.
                         if ack.is_some() {
                             debug!("flush ack dropped: batcher is stopped, flush produces no frames");
                         }
                         continue;
                     }
-                    Ok(L2BlockEvent::Block(block)) => DriverEvent::Block(block),
-                    Ok(L2BlockEvent::Flush { ack }) => DriverEvent::SourceFlush(ack),
-                    Ok(L2BlockEvent::Reorg) => DriverEvent::Reorg,
-                    Err(SourceError::Exhausted) => DriverEvent::Shutdown,
-                    Err(e) => return Err(e.into()),
+                    L2BlockEvent::Block(block) => DriverEvent::Block(block),
+                    L2BlockEvent::Flush { ack } => DriverEvent::SourceFlush(ack),
+                    L2BlockEvent::Reorg => DriverEvent::Reorg,
                 },
 
                 Some((ids, outcome)) = self.submissions.next_settled() => {
@@ -619,7 +611,11 @@ where
                     }
                 } => match l1_event {
                     Ok(L1HeadEvent::NewHead(n)) => DriverEvent::L1Head(n),
-                    Err(SourceError::Exhausted | SourceError::Closed) => DriverEvent::L1SourceClosed,
+                    Err(SourceError::Closed) => {
+                        warn!("L1 head source closed, L1 head tracking stopped");
+                        self.l1_head_source = None;
+                        continue;
+                    }
                     Err(e) => {
                         warn!(error = %e, "L1 head source error");
                         continue;
