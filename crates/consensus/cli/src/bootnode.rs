@@ -162,7 +162,8 @@ pub struct BootnodeP2PArgs {
     #[arg(
         long = "p2p.discovery.interval",
         default_value = "5",
-        env = "BASE_NODE_P2P_DISCOVERY_INTERVAL"
+        env = "BASE_NODE_P2P_DISCOVERY_INTERVAL",
+        value_parser = clap::value_parser!(u64).range(1..)
     )]
     pub discovery_interval: u64,
 
@@ -179,7 +180,11 @@ pub struct BootnodeP2PArgs {
     pub bootnodes: Vec<String>,
 
     /// Optionally remove random peers from discovery to rotate the peer set.
-    #[arg(long = "p2p.discovery.randomize", env = "BASE_NODE_P2P_DISCOVERY_RANDOMIZE")]
+    #[arg(
+        long = "p2p.discovery.randomize",
+        env = "BASE_NODE_P2P_DISCOVERY_RANDOMIZE",
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
     pub discovery_randomize: Option<u64>,
 
     /// Path to write the local bootnode ENR after it is materialized.
@@ -398,7 +403,7 @@ mod tests {
 
     use super::*;
 
-    #[derive(Parser)]
+    #[derive(Debug, Parser)]
     struct TestCommand {
         #[command(flatten)]
         p2p: BootnodeP2PArgs,
@@ -407,6 +412,16 @@ mod tests {
     fn p2p_args(args: &[&str]) -> BootnodeP2PArgs {
         let args = [&["test"], args].concat();
         TestCommand::parse_from(args).p2p
+    }
+
+    #[test]
+    fn rejects_zero_discovery_intervals() {
+        for flag in ["--p2p.discovery.interval", "--p2p.discovery.randomize"] {
+            let error = TestCommand::try_parse_from(["test", flag, "0"])
+                .expect_err("zero discovery intervals must be rejected");
+
+            assert!(error.to_string().contains("1.."));
+        }
     }
 
     #[test]
