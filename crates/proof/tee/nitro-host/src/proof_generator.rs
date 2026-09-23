@@ -1,6 +1,6 @@
 //! Proof generation orchestration for claimed Nitro worker jobs.
 
-use std::{future::Future, sync::Arc};
+use std::{future::Future, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use base_proof_primitives::ProofRequest as NitroProofRequest;
@@ -19,13 +19,20 @@ use base_prover_service_client::{ProverServiceClientError, ProverWorkerProvider}
 use base_prover_service_protocol::{ProofJob, ProofRequestKind, TeeKind};
 use chrono::{DateTime, Utc};
 use thiserror::Error;
-use tokio::task::JoinHandle;
+use tokio::{task::JoinHandle, time::timeout};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, info, info_span, warn};
 
 use crate::{
     NitroEnclavePool, NitroEnclavePoolError, ProofSubmitterRequest, ProofSubmitterRequestError,
 };
+
+/// Maximum time to wait for generation cleanup after heartbeat failure.
+///
+/// Nitro enclave proving can be uninterruptible while the enclave finishes a request. Once the
+/// worker has lost its lease, the discovery loop must resume after this bound rather than wait
+/// indefinitely for that request.
+const DEFAULT_PROOF_GENERATOR_HEARTBEAT_FAILURE_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Claimed prover-service job data needed to generate and submit a Nitro proof.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,8 +203,13 @@ where
                         Some(Self::stopped_heartbeat_error())
                     })
                     .unwrap_or_else(Self::stopped_heartbeat_error);
-                match generate.await {
-                    Ok(_) => {
+                match timeout(
+                    DEFAULT_PROOF_GENERATOR_HEARTBEAT_FAILURE_DRAIN_TIMEOUT,
+                    &mut generate,
+                )
+                .await
+                {
+                    Ok(Ok(_)) => {
                         info!(
                             session_id = %request.claim.session_id,
                             lock_id = %request.claim.lock_id,
@@ -206,14 +218,27 @@ where
                             "discarding nitro proof generated after heartbeat failure"
                         );
                     }
-                    Err(error) => {
+                    Ok(Err(error)) => {
                         warn!(
                             session_id = %request.claim.session_id,
                             lock_id = %request.claim.lock_id,
                             worker_id = %request.claim.worker_id,
+                            l2_block = request.proof.claimed_l2_block_number,
                             error = %error,
                             "nitro proof generation finished with error after heartbeat failure"
                         );
+                    }
+                    Err(_) => {
+                        warn!(
+                            session_id = %request.claim.session_id,
+                            lock_id = %request.claim.lock_id,
+                            worker_id = %request.claim.worker_id,
+                            l2_block = request.proof.claimed_l2_block_number,
+                            timeout = ?DEFAULT_PROOF_GENERATOR_HEARTBEAT_FAILURE_DRAIN_TIMEOUT,
+                            "timed out waiting for nitro proof generation after heartbeat failure"
+                        );
+                        // An enclave proof may continue after this worker loses its lease. Keep
+                        // its server-side state untouched so a later claim can recover it.
                     }
                 }
 
@@ -385,7 +410,7 @@ mod tests {
         WorkerSubmitProofRequest, WorkerSubmitProofResponse,
     };
     use chrono::Utc;
-    use tokio::time::sleep;
+    use tokio::time::{advance, sleep};
 
     use super::*;
     use crate::{NitroTransport, RegistrationChecker, test_utils::MockRegistry};
@@ -776,6 +801,45 @@ mod tests {
             *generation_finished.lock().expect("generation completion flag should not be poisoned"),
             "heartbeat failure must not return until in-flight generation finishes"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn heartbeat_failure_stops_waiting_for_unfinished_generation_at_cleanup_deadline() {
+        let client = MockWorkerClient::with_heartbeat_failure(MockHeartbeatFailure::NonRetryable);
+        let generator = generator_with_heartbeat_interval(client.clone(), Duration::from_millis(5));
+        let request = claimed_tee_request();
+
+        let handle = tokio::spawn(async move {
+            generator
+                .with_heartbeat_while_generating(
+                    &request,
+                    std::future::pending::<Result<(), NitroEnclavePoolError>>(),
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
+
+        for _ in 0..100 {
+            if !client.heartbeats().is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(!client.heartbeats().is_empty(), "heartbeat failure should be observed");
+        std::thread::sleep(Duration::from_millis(10));
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+
+        advance(DEFAULT_PROOF_GENERATOR_HEARTBEAT_FAILURE_DRAIN_TIMEOUT).await;
+        tokio::task::yield_now().await;
+        let err = timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("heartbeat failure must not wait indefinitely for generation")
+            .expect("generation task should not panic")
+            .unwrap_err();
+
+        assert!(matches!(err, ProofGeneratorError::Heartbeat { .. }));
     }
 
     #[tokio::test]
