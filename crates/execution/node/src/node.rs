@@ -15,7 +15,7 @@ use base_common_consensus::{BasePrimitives, BaseTransaction, BaseTxEnvelope};
 use base_common_rpc_types_engine::{BasePayloadAttributes, ExecutionData};
 use base_execution_chainspec::BaseChainSpec;
 use base_execution_consensus::BaseBeaconConsensus;
-use base_execution_evm::{BaseEvmConfig, BaseRethReceiptBuilder};
+use base_execution_evm::{BaseEvmConfig, BaseExecutorProvider, BaseRethReceiptBuilder};
 use base_execution_payload_builder::{
     Attributes, BaseBuiltPayload, BasePayloadBuilderAttributes,
     DEFAULT_PREDICATE_BUCKET_ORDERED_THRESHOLD, PayloadPrimitives, RejectionCache,
@@ -232,6 +232,19 @@ impl BaseNode {
             da_config: BaseDAConfig::default(),
             gas_limit_config: GasLimitConfig::default(),
         }
+    }
+
+    /// Returns the Base execution and consensus components used by reth maintenance commands.
+    ///
+    /// The `BaseNode` owns this mapping so maintenance commands execute with the same
+    /// Base-specific EVM and consensus implementations as a launched node.
+    pub fn maintenance_components(
+        chain_spec: Arc<BaseChainSpec>,
+    ) -> (BaseExecutorProvider, Arc<BaseBeaconConsensus>) {
+        (
+            BaseExecutorProvider::base(Arc::clone(&chain_spec)),
+            Arc::new(BaseBeaconConsensus::new(chain_spec)),
+        )
     }
 
     /// Configure the data availability configuration for the payload builder.
@@ -1476,12 +1489,44 @@ mod tests {
         sync::Arc,
     };
 
-    use reth_chainspec::MAINNET;
+    use alloy_consensus::Header;
+    use base_common_chains::BaseUpgrade;
+    use reth_chainspec::{ForkCondition, MAINNET};
+    use reth_consensus::HeaderValidator;
     use reth_discv5::{build_local_enr, discv5::ListenConfig};
     use reth_network::{EthNetworkPrimitives, NetworkConfigBuilder, config::rng_secret_key};
+    use reth_primitives_traits::SealedHeader;
     use rstest::rstest;
 
     use super::*;
+
+    #[test]
+    fn maintenance_components_preserve_base_chain_consensus() {
+        let mut chain_spec = BaseChainSpec::mainnet();
+        chain_spec.set_fork(BaseUpgrade::Denim, ForkCondition::Timestamp(10));
+
+        let parent_header = Header {
+            number: 8,
+            timestamp: 10,
+            gas_limit: 30_000_000,
+            gas_used: 15_000_000,
+            base_fee_per_gas: Some(1_000_000_000),
+            ..Default::default()
+        };
+        let child_base_fee = chain_spec.next_block_base_fee(&parent_header, 10).unwrap();
+        let (_, consensus) = BaseNode::maintenance_components(Arc::new(chain_spec));
+        let parent = SealedHeader::seal_slow(parent_header);
+        let child = SealedHeader::seal_slow(Header {
+            number: 9,
+            parent_hash: parent.hash(),
+            timestamp: 10,
+            gas_limit: 30_000_000,
+            base_fee_per_gas: Some(child_base_fee),
+            ..Default::default()
+        });
+
+        consensus.validate_header_against_parent(&child, &parent).unwrap();
+    }
 
     #[test]
     fn payload_builder_preserves_manifest_precheck_setting() {

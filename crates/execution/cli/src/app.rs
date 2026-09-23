@@ -1,8 +1,5 @@
-use std::{fmt, sync::Arc};
+use std::fmt;
 
-use base_execution_chainspec::BaseChainSpec;
-use base_execution_consensus::BaseBeaconConsensus;
-use base_execution_evm::BaseExecutorProvider;
 use base_node_core::BaseNode;
 use eyre::{Result, eyre};
 use reth_cli_commands::launcher::Launcher;
@@ -73,12 +70,7 @@ where
         // Install the prometheus recorder to be sure to record all metrics
         install_prometheus_recorder();
 
-        let components = |spec: Arc<BaseChainSpec>| {
-            (
-                BaseExecutorProvider::base(Arc::clone(&spec)),
-                Arc::new(BaseBeaconConsensus::new(spec)),
-            )
-        };
+        let components = BaseNode::maintenance_components;
 
         match self.cli.command {
             Commands::Node(command) => {
