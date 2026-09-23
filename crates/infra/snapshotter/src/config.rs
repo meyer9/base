@@ -128,7 +128,11 @@ pub struct SnapshotterConfig {
     pub s3_config_type: S3ConfigType,
 
     /// S3 endpoint URL (for R2 or `MinIO`). Required for `manual` config type.
-    #[arg(long, env = "SNAPSHOTTER_S3_ENDPOINT")]
+    #[arg(
+        long,
+        env = "SNAPSHOTTER_S3_ENDPOINT",
+        required_if_eq("s3_config_type", "manual")
+    )]
     pub s3_endpoint: Option<String>,
 
     /// S3 region.
@@ -136,11 +140,19 @@ pub struct SnapshotterConfig {
     pub s3_region: String,
 
     /// S3 access key ID. Required for `manual` config type.
-    #[arg(long, env = "SNAPSHOTTER_S3_ACCESS_KEY_ID")]
+    #[arg(
+        long,
+        env = "SNAPSHOTTER_S3_ACCESS_KEY_ID",
+        required_if_eq("s3_config_type", "manual")
+    )]
     pub s3_access_key_id: Option<String>,
 
     /// S3 secret access key. Required for `manual` config type.
-    #[arg(long, env = "SNAPSHOTTER_S3_SECRET_ACCESS_KEY")]
+    #[arg(
+        long,
+        env = "SNAPSHOTTER_S3_SECRET_ACCESS_KEY",
+        required_if_eq("s3_config_type", "manual")
+    )]
     pub s3_secret_access_key: Option<String>,
 
     /// Package and upload the proofs database from `{source_datadir}/proofs`.
