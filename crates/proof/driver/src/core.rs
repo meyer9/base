@@ -3,17 +3,21 @@
 use alloc::{sync::Arc, vec::Vec};
 use core::fmt::Debug;
 
-use alloy_consensus::BlockBody;
+use alloy_consensus::{BlockBody, Header, Sealed};
 use alloy_primitives::{B256, Bytes};
 use alloy_rlp::Decodable;
 use base_common_consensus::{BaseBlock, BaseTxEnvelope, OpTxType};
 use base_common_genesis::RollupConfig;
+use base_common_rpc_types_engine::BasePayloadAttributes;
 use base_consensus_derive::{Pipeline, PipelineError, PipelineErrorKind, Signal, SignalReceiver};
 use base_proof_executor::BlockBuildingOutcome;
 use base_protocol::L2BlockInfo;
 use spin::RwLock;
 
-use crate::{DriverError, DriverPipeline, DriverResult, Executor, PipelineCursor, TipCursor};
+use crate::{
+    DriverError, DriverPipeline, DriverResult, Executor, PayloadExecutionFailureAction,
+    PipelineCursor, TipCursor,
+};
 
 /// The Rollup Driver entrypoint.
 #[derive(Debug)]
@@ -55,6 +59,62 @@ where
     /// Waits until the executor is ready for block processing.
     pub async fn wait_for_executor(&mut self) {
         self.executor.wait_until_ready().await;
+    }
+
+    /// Executes a payload and applies the canonical derivation recovery transition.
+    ///
+    /// A failed pre-Holocene payload is discarded. After Holocene, only errors
+    /// designated by the executor as deposit-only retryable flush the current
+    /// channel and retry with deposits; every other error stops derivation.
+    pub async fn execute_payload_with_recovery(
+        &mut self,
+        cfg: &RollupConfig,
+        safe_head_header: Sealed<Header>,
+        attributes: &mut BasePayloadAttributes,
+    ) -> DriverResult<Option<BlockBuildingOutcome>, E::Error> {
+        self.executor.update_safe_head(safe_head_header.clone());
+        match self.executor.execute_payload(attributes.clone()).await {
+            Ok(outcome) => Ok(Some(outcome)),
+            Err(error) => {
+                error!(target: "client", error = %error, "Failed to execute L2 block");
+
+                let holocene_active = cfg.is_holocene_active(attributes.payload_attributes.timestamp);
+                match PayloadExecutionFailureAction::from_execution_failure(
+                    holocene_active,
+                    holocene_active && E::is_deposit_only_retryable(&error),
+                ) {
+                    PayloadExecutionFailureAction::DiscardPreHolocene => Ok(None),
+                    PayloadExecutionFailureAction::Abort => Err(DriverError::Executor(error)),
+                    PayloadExecutionFailureAction::RetryDepositOnly => {
+                        warn!(target: "client", "Flushing current channel and retrying deposit only block");
+                        self.pipeline.signal(Signal::FlushChannel).await?;
+                        attributes.transactions =
+                            attributes.transactions.take().map(|transactions| {
+                                transactions
+                                    .into_iter()
+                                    .filter(|transaction| {
+                                        !transaction.is_empty()
+                                            && transaction[0] == OpTxType::Deposit as u8
+                                    })
+                                    .collect()
+                            });
+
+                        self.executor.update_safe_head(safe_head_header);
+                        match self.executor.execute_payload(attributes.clone()).await {
+                            Ok(outcome) => Ok(Some(outcome)),
+                            Err(error) => {
+                                error!(
+                                    target: "client",
+                                    error = %error,
+                                    "Critical - Failed to execute deposit-only block",
+                                );
+                                Err(DriverError::Executor(error))
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Advances the derivation pipeline to the target block number.
@@ -100,51 +160,15 @@ where
                 }
             };
 
-            self.executor.update_safe_head(tip_cursor.l2_safe_head_header.clone());
-            let outcome = match self.executor.execute_payload(attributes.clone()).await {
-                Ok(outcome) => outcome,
-                Err(e) => {
-                    error!(target: "client", error = %e, "Failed to execute L2 block");
-
-                    if !cfg.is_holocene_active(attributes.payload_attributes.timestamp) {
-                        // Pre-Holocene, discard the block if execution fails.
-                        continue;
-                    }
-
-                    if !E::is_deposit_only_retryable(&e) {
-                        return Err(DriverError::Executor(e));
-                    }
-
-                    // Retry with a deposit-only block.
-                    warn!(target: "client", "Flushing current channel and retrying deposit only block");
-
-                    // Flush the current batch and channel - if a block was replaced with a
-                    // deposit-only block due to execution failure, the
-                    // batch and channel it is contained in is forwards
-                    // invalidated.
-                    self.pipeline.signal(Signal::FlushChannel).await?;
-
-                    // Strip out all transactions that are not deposits.
-                    attributes.transactions = attributes.transactions.map(|txs| {
-                        txs.into_iter()
-                            .filter(|tx| !tx.is_empty() && tx[0] == OpTxType::Deposit as u8)
-                            .collect::<Vec<_>>()
-                    });
-
-                    // Retry the execution.
-                    self.executor.update_safe_head(tip_cursor.l2_safe_head_header.clone());
-                    match self.executor.execute_payload(attributes.clone()).await {
-                        Ok(header) => header,
-                        Err(e) => {
-                            error!(
-                                target: "client",
-                                error = %e,
-                                "Critical - Failed to execute deposit-only block",
-                            );
-                            return Err(DriverError::Executor(e));
-                        }
-                    }
-                }
+            let Some(outcome) = self
+                .execute_payload_with_recovery(
+                    cfg,
+                    tip_cursor.l2_safe_head_header.clone(),
+                    &mut attributes,
+                )
+                .await?
+            else {
+                continue;
             };
 
             // Construct the block.

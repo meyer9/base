@@ -14,7 +14,7 @@ mod pipeline;
 pub use pipeline::DriverPipeline;
 
 mod executor;
-pub use executor::Executor;
+pub use executor::{Executor, PayloadExecutionFailureAction};
 
 mod core;
 pub use core::Driver;
