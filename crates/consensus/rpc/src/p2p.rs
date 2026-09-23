@@ -188,20 +188,40 @@ impl BaseP2PApiServer for P2pRpc {
 
     async fn opp2p_connect_peer(&self, peer: String) -> RpcResult<()> {
         Metrics::rpc_calls("opp2p_connectPeer").increment(1.0);
-        self.connect_peer_with_backoff(
-            peer,
-            ExponentialBuilder::default().with_total_delay(Some(PEER_STATE_WAIT_TIMEOUT)),
+        tokio::time::timeout(
+            PEER_STATE_WAIT_TIMEOUT,
+            self.connect_peer_with_backoff(
+                peer,
+                ExponentialBuilder::default().with_total_delay(Some(PEER_STATE_WAIT_TIMEOUT)),
+            ),
         )
         .await
+        .map_err(|_| {
+            ErrorObject::borrowed(
+                ErrorCode::InternalError.code(),
+                "Timed out waiting for peer connection state",
+                None,
+            )
+        })?
     }
 
     async fn opp2p_disconnect_peer(&self, peer_id: String) -> RpcResult<()> {
         Metrics::rpc_calls("opp2p_disconnectPeer").increment(1.0);
-        self.disconnect_peer_with_backoff(
-            peer_id,
-            ExponentialBuilder::default().with_total_delay(Some(PEER_STATE_WAIT_TIMEOUT)),
+        tokio::time::timeout(
+            PEER_STATE_WAIT_TIMEOUT,
+            self.disconnect_peer_with_backoff(
+                peer_id,
+                ExponentialBuilder::default().with_total_delay(Some(PEER_STATE_WAIT_TIMEOUT)),
+            ),
         )
         .await
+        .map_err(|_| {
+            ErrorObject::borrowed(
+                ErrorCode::InternalError.code(),
+                "Timed out waiting for peer connection state",
+                None,
+            )
+        })?
     }
 }
 
@@ -331,6 +351,7 @@ impl P2pRpc {
 mod tests {
     use std::{
         collections::VecDeque,
+        future::pending,
         str::FromStr,
         sync::{
             Arc,
@@ -341,9 +362,14 @@ mod tests {
 
     use backon::ExponentialBuilder;
     use base_consensus_gossip::{P2pRpcRequest, PeerDump, PeerInfo};
-    use tokio::sync::mpsc;
+    use jsonrpsee::types::ErrorCode;
+    use tokio::{
+        sync::{mpsc, oneshot},
+        time::advance,
+    };
 
-    use crate::net::P2pRpc;
+    use super::PEER_STATE_WAIT_TIMEOUT;
+    use crate::{BaseP2PApiServer, net::P2pRpc};
 
     fn test_backoff() -> ExponentialBuilder {
         ExponentialBuilder::default()
@@ -378,6 +404,64 @@ mod tests {
 
     fn peer_multiaddr(peer_id: &libp2p::PeerId) -> String {
         format!("/ip4/127.0.0.1/tcp/30303/p2p/{peer_id}")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connect_peer_times_out_when_peer_state_response_stalls() {
+        let (sender, mut requests) = mpsc::channel(8);
+        let peer_id = libp2p::PeerId::random();
+        let (state_request_started, state_request_received) = oneshot::channel();
+        let handler = tokio::spawn(async move {
+            assert!(matches!(requests.recv().await, Some(P2pRpcRequest::ConnectPeer { .. })));
+            let Some(P2pRpcRequest::Peers { out, connected: true }) = requests.recv().await else {
+                panic!("expected peer state request");
+            };
+            let _response = out;
+            state_request_started.send(()).expect("connect request should still be pending");
+            pending::<()>().await;
+        });
+        let rpc = P2pRpc::new(sender);
+        let request = tokio::spawn(async move {
+            BaseP2PApiServer::opp2p_connect_peer(&rpc, peer_multiaddr(&peer_id)).await
+        });
+
+        state_request_received.await.expect("peer state request should be sent");
+        advance(PEER_STATE_WAIT_TIMEOUT).await;
+
+        let error =
+            request.await.expect("connect task should complete").expect_err("must time out");
+        assert_eq!(error.code(), ErrorCode::InternalError.code());
+        assert_eq!(error.message(), "Timed out waiting for peer connection state");
+        handler.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn disconnect_peer_times_out_when_peer_state_response_stalls() {
+        let (sender, mut requests) = mpsc::channel(8);
+        let peer_id = libp2p::PeerId::random();
+        let (state_request_started, state_request_received) = oneshot::channel();
+        let handler = tokio::spawn(async move {
+            assert!(matches!(requests.recv().await, Some(P2pRpcRequest::DisconnectPeer { .. })));
+            let Some(P2pRpcRequest::Peers { out, connected: true }) = requests.recv().await else {
+                panic!("expected peer state request");
+            };
+            let _response = out;
+            state_request_started.send(()).expect("disconnect request should still be pending");
+            pending::<()>().await;
+        });
+        let rpc = P2pRpc::new(sender);
+        let request = tokio::spawn(async move {
+            BaseP2PApiServer::opp2p_disconnect_peer(&rpc, peer_id.to_string()).await
+        });
+
+        state_request_received.await.expect("peer state request should be sent");
+        advance(PEER_STATE_WAIT_TIMEOUT).await;
+
+        let error =
+            request.await.expect("disconnect task should complete").expect_err("must time out");
+        assert_eq!(error.code(), ErrorCode::InternalError.code());
+        assert_eq!(error.message(), "Timed out waiting for peer connection state");
+        handler.abort();
     }
 
     #[tokio::test]
