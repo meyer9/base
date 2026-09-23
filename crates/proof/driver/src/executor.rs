@@ -13,6 +13,36 @@ use async_trait::async_trait;
 use base_common_rpc_types_engine::BasePayloadAttributes;
 use base_proof_executor::BlockBuildingOutcome;
 
+/// The action the driver takes after a payload execution failure.
+///
+/// This is the canonical transition decision for legacy pre-Holocene payload
+/// failures and Holocene deposit-only recovery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PayloadExecutionFailureAction {
+    /// Discard a failed pre-Holocene payload and continue derivation.
+    DiscardPreHolocene,
+    /// Flush the channel and retry the payload with deposits only.
+    RetryDepositOnly,
+    /// Stop derivation because the execution failure is not recoverable.
+    Abort,
+}
+
+impl PayloadExecutionFailureAction {
+    /// Selects the transition for a failed payload execution.
+    pub const fn from_execution_failure(
+        holocene_active: bool,
+        deposit_only_retryable: bool,
+    ) -> Self {
+        if !holocene_active {
+            Self::DiscardPreHolocene
+        } else if deposit_only_retryable {
+            Self::RetryDepositOnly
+        } else {
+            Self::Abort
+        }
+    }
+}
+
 /// Executor trait for block execution in the driver pipeline.
 ///
 /// This trait abstracts the block execution functionality needed by the driver.
@@ -45,4 +75,25 @@ pub trait Executor {
 
     /// Computes the output root for the most recently executed block.
     fn compute_output_root(&mut self) -> Result<B256, Self::Error>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PayloadExecutionFailureAction;
+
+    #[test]
+    fn selects_the_supported_execution_failure_transition() {
+        assert_eq!(
+            PayloadExecutionFailureAction::from_execution_failure(false, true),
+            PayloadExecutionFailureAction::DiscardPreHolocene
+        );
+        assert_eq!(
+            PayloadExecutionFailureAction::from_execution_failure(true, true),
+            PayloadExecutionFailureAction::RetryDepositOnly
+        );
+        assert_eq!(
+            PayloadExecutionFailureAction::from_execution_failure(true, false),
+            PayloadExecutionFailureAction::Abort
+        );
+    }
 }
